@@ -15,8 +15,7 @@ describe("assertClaimShape", () => {
   const noopLogger = { error() {}, warn() {} };
 
   it("strips params keys the attestor schema does not declare", () => {
-    // responseSelections is a real legacy provider field with no schema
-    // counterpart; it used to be copied straight into params.
+    // responseSelections is a real legacy provider field with no schema counterpart.
     const params = {
       url: "https://x/y",
       method: "GET",
@@ -64,9 +63,8 @@ describe("assertClaimShape", () => {
     assert.equal(secretParams.cookieStr, "a=b");
   });
 
-  it("coerces non-string paramValues, which a customInjection can produce", () => {
-    // window.Reclaim lets a provider script hand back any JS value; the schema
-    // types paramValues as string→string.
+  it("coerces non-string paramValues", () => {
+    // The schema types paramValues as string→string.
     const params = {
       url: "u",
       method: "GET",

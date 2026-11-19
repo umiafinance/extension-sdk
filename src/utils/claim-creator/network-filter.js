@@ -1,8 +1,7 @@
 // Import shared utility functions
 import { isJsonFormat, jsonPathExists, safeJsonParse } from "./params-extractor-utils.js";
 import { makeRegex } from "./make-regex.js";
-// Dependency-free by design, so it is safe for the content bundle — see the
-// "Keep them out of the content bundle" rule for the vendored parsers.
+// Dependency-free by design, so it is safe for the content bundle.
 import { normalizeUrlType, URL_TYPES } from "../provider-normalization.js";
 
 function escapeSpecialCharacters(input) {
@@ -120,9 +119,7 @@ function describeRequestCriteria(request, filterCriteria, parameters = {}) {
 
   // CONSTANT is upstream's default and its name for a plain URL; EXACT is this
   // SDK's local alias for the same thing. An unknown value is inferred from the
-  // url rather than left unmatchable — this branch used to `return false` for
-  // everything it did not recognise, so a provider carrying the canonical
-  // CONSTANT never matched a single request.
+  // url rather than left unmatchable.
   const type = normalizeUrlType(urlType, url);
 
   const urlMatches =
@@ -217,12 +214,10 @@ function describeResponseCriteria(responseText, matchCriteria, parameters = {}) 
 // background via ../claim-creator/attestor-extraction.js, which is where the
 // parsers live.
 //
-// Notably there is no xPath branch. There used to be, backed by a
-// regex-on-tag-name stand-in that could not evaluate most real XPath
-// expressions, so it rejected pages the attestor would have accepted. A
-// faithful xPath check needs xpath+parse5, and this module is bundled into a
-// content script injected at document_start on every page of every site — so
-// xPath is deferred to the background rather than approximated here.
+// Notably there is no xPath branch: a faithful xPath check needs xpath+parse5,
+// and this module is bundled into a content script injected at document_start
+// on every page of every site, so xPath is deferred to the background rather
+// than approximated here.
 function describeResponseFields(responseText, responseRedactions, logger) {
   if (!responseRedactions || responseRedactions.length === 0) {
     return matched();
@@ -329,5 +324,3 @@ export const describeRequestMatch = (request, filterCriteria, parameters = {}, l
 // Main filtering function
 export const filterRequest = (request, filterCriteria, parameters = {}, logger) =>
   describeRequestMatch(request, filterCriteria, parameters, logger).matched;
-
-//tryWithNonce/tryWithTT/tryPlain

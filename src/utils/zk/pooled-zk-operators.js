@@ -199,6 +199,8 @@ function makePooledOperators(engine, size, options = {}) {
             const startedAt = performance.now();
             const fallback = size > 0 && !pool;
             let workerProveMs;
+            let proofBytes;
+            let encodedProofBytes;
             try {
               let result;
               if (pool) {
@@ -208,8 +210,12 @@ function makePooledOperators(engine, size, options = {}) {
               } else {
                 result = await stock.groth16Prove(witness, logger);
               }
-              if (engine !== "stwo" || !STWO_PROOF_COMPRESSION) return result;
-              return { ...result, proof: await compressStwoProof(result.proof) };
+              if (result.proof instanceof Uint8Array) proofBytes = result.proof.byteLength;
+              const encoded = engine === "stwo" && STWO_PROOF_COMPRESSION
+                ? { ...result, proof: await compressStwoProof(result.proof) }
+                : result;
+              if (encoded.proof instanceof Uint8Array) encodedProofBytes = encoded.proof.byteLength;
+              return encoded;
             } finally {
               const endedAt = performance.now();
               onProve({
@@ -221,6 +227,8 @@ function makePooledOperators(engine, size, options = {}) {
                 startedAt,
                 endedAt,
                 fallback,
+                proofBytes,
+                encodedProofBytes,
               });
             }
           },

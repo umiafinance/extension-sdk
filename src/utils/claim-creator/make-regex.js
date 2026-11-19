@@ -13,9 +13,8 @@
  * xpath/parse5/esprima into a bundle that is injected at document_start on
  * every page of every site.
  *
- * The flags matter: the previous code built flagless `new RegExp(pattern)`, so
- * any provider regex relying on `s` (dot matches newline) or `i` behaved
- * differently here than at the attestor.
+ * The flags matter: a provider regex relying on `s` (dot matches newline) or
+ * `i` must behave here exactly as it does at the attestor.
  *
  * @param {string} str
  * @returns {RegExp}

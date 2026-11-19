@@ -4,14 +4,11 @@ import { MESSAGE_ACTIONS, MESSAGE_SOURCES } from "../constants/index";
 import { ensureOffscreenDocument } from "../offscreen-manager";
 import { PROOF_RESPONSE_TIMEOUT_MS } from "../constants/config";
 import { EVENT_TYPES } from "../logger/constants";
+import { approvedProfileNames } from "../session-config";
 
 /**
- * Reject with a real Error that still carries the `{success, error}` shape.
- *
- * These paths used to reject a plain object literal, so `error.message` in
- * proofQueue's catch was `undefined` — the session's one explanation of a proof
- * timeout read "Proof generation failed: undefined", and that string is also
- * what reaches the consumer's Promise.
+ * Reject with a real Error that still carries the `{success, error}` shape, so
+ * `error.message` is set in proofQueue's catch and on the consumer's Promise.
  */
 const rejection = (message) => {
   const error = new Error(message);
@@ -105,7 +102,7 @@ export const generateProof = async (claimData, loggingHub) => {
           action: MESSAGE_ACTIONS.GENERATE_PROOF,
           source: MESSAGE_SOURCES.BACKGROUND,
           target: MESSAGE_SOURCES.OFFSCREEN,
-          data: claimData,
+          data: { ...claimData, profiles: approvedProfileNames() },
           transportRequestId,
         },
         () => {

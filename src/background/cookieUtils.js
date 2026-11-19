@@ -235,10 +235,9 @@ export function shouldIncludeCookie(cookie, urlObj, loggingHub) {
     const cookieDomain = cookie.domain.startsWith(".") ? cookie.domain.substring(1) : cookie.domain;
     const requestDomain = urlObj.hostname;
 
-    const domainMatches =
-      requestDomain === cookieDomain ||
-      requestDomain.endsWith("." + cookieDomain) ||
-      (cookie.domain.startsWith(".") && requestDomain.endsWith(cookie.domain.substring(1)));
+    const domainMatches = cookie.hostOnly
+      ? requestDomain === cookie.domain
+      : requestDomain === cookieDomain || requestDomain.endsWith("." + cookieDomain);
 
     if (!domainMatches) {
       return false;
@@ -247,7 +246,10 @@ export function shouldIncludeCookie(cookie, urlObj, loggingHub) {
     // Check path match
     const cookiePath = cookie.path || "/";
     const requestPath = urlObj.pathname;
-    const pathMatches = requestPath.startsWith(cookiePath);
+    const pathMatches =
+      requestPath === cookiePath ||
+      (requestPath.startsWith(cookiePath) &&
+        (cookiePath.endsWith("/") || requestPath.charAt(cookiePath.length) === "/"));
 
     if (!pathMatches) {
       return false;

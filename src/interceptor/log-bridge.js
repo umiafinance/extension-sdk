@@ -1,12 +1,9 @@
 /**
  * Log bridge for MAIN-world scripts.
  *
- * The network interceptor and the injection scripts run in the page's own
- * JavaScript world. There is no `chrome.runtime` there, so until this bridge
- * existed their diagnostics went straight to `console`, never gated by the SDK's
- * log config. That is the most
- * failure-prone stage of the whole flow — request interception — logging into a
- * void.
+ * The network interceptor runs in the page's own JavaScript world, where there
+ * is no `chrome.runtime`, so its diagnostics need this bridge to reach the SDK's
+ * log config.
  *
  * The bridge posts each line to the content script (`RECLAIM_LOG`), which
  * relays it to the LoggingHub like any other context. Console mirroring is
@@ -115,7 +112,7 @@ function split(args) {
  * The returned object keeps the `log`/`info`/`error` shape the interceptor
  * already used, so call sites did not have to change, and adds `warn`/`debug`.
  *
- * @param {string} context - "interceptor" | "injection"
+ * @param {string} context - "interceptor"
  * @param {string} category - dotted log category, e.g. "interceptor.network"
  * @returns {{log: Function, info: Function, warn: Function, error: Function, debug: Function}}
  */

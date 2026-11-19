@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
-import { ZKTLS_EXTENSION_ORIGIN_ALLOWLIST } from "@umia/types/zktls-self-host";
+import { ZKTLS_EXTENSION_ORIGIN_ALLOWLIST } from "@umia/zktls-config/self-host";
 import {
   MESSAGE_ACTIONS,
   MESSAGE_SOURCES,
@@ -23,17 +23,11 @@ function bound(id, lifetimeMs) {
       callerOrigin: profile.callerOrigin,
       backendUrl: profile.backendUrl,
       attestorUrl: profile.attestorUrl,
-      authority: {
-        digest: `sha256:${"c".repeat(64)}`,
-        validUntil: new Date(now + lifetimeMs).toISOString(),
-        witnesses: [],
-      },
       network: {},
     },
     umia: {
-      providerVersion: "v1",
       sessionToken: "a".repeat(64),
-      expiresAt: new Date(now + 600_000).toISOString(),
+      expiresAt: new Date(now + lifetimeMs).toISOString(),
       attestorAuth: {
         data: {
           id,
@@ -102,7 +96,7 @@ function context() {
 
 async function start(ctx, id, lifetimeMs = LIFETIME_MS) {
   ctx.activeSessionId = id;
-  ctx.initiatingSender = { sessionId: id, tabId: 42, documentId: "hub-document" };
+  ctx.initiatingSender = { sessionId: id, tabId: 42, documentId: "caller-document" };
   await startVerification(ctx, {
     sessionId: id,
     providerId: "provider-one",
@@ -246,6 +240,43 @@ test("a session idle after its first of two proofs still expires at its deadline
   await Bun.sleep(PAST_DEADLINE_MS);
   assert.equal(ctx.generatedProofs.size, 1);
   assertFailedOnce(ctx, "half-done", "SESSION_EXPIRED");
+});
+
+test("a claim queued behind another proof generates without the session timer running", async () => {
+  reset();
+  const ctx = context();
+  const requestTwo = `0x${"2".repeat(64)}`;
+  ctx.fetchProviderData = async () => ({
+    provider: {
+      id: "provider-one",
+      requestData: [{ requestHash: REQUEST_ONE }, { requestHash: requestTwo }],
+    },
+    loginUrl: "https://fixture.example/login",
+  });
+  ctx.generateProof = () => Bun.sleep(120).then(() => ({ success: true, proof: { claim: {} } }));
+  ctx.claimProgress = () => ({});
+  ctx.submitProofs = () => submitProofs(ctx);
+  ctx.sessionTimerManager.setTimerDuration(50);
+  ctx.sessionTimerManager.setCallbacks(() => ctx.failSession("REQUEST_NOT_CAPTURED"));
+  await start(ctx, "queued", 600_000);
+  // Both requests of one signed-in page arrive together, as a replay of every entry sends them.
+  ctx.sessionTimerManager.startSessionTimer();
+  addToProofGenerationQueue(ctx, { session: { sessionId: "queued" } }, REQUEST_ONE);
+  addToProofGenerationQueue(ctx, { session: { sessionId: "queued" } }, requestTwo);
+  const submitted = () =>
+    sent.some(
+      ({ tabId, message }) => tabId === 42 && message.action === MESSAGE_ACTIONS.PROOF_SUBMITTED,
+    );
+  for (let waited = 0; waited < 5_000 && !submitted() && !failures().length; waited += 20) {
+    await Bun.sleep(20);
+  }
+  assert.deepEqual(failures(), []);
+  assert.equal(ctx.generatedProofs.size, 2);
+  assert.ok(
+    sent.some(
+      ({ tabId, message }) => tabId === 42 && message.action === MESSAGE_ACTIONS.PROOF_SUBMITTED,
+    ),
+  );
 });
 
 test("a late failure after a session ended sends no second terminal event", async () => {

@@ -1,8 +1,8 @@
 /**
  * The client source string is a wire contract in two directions: the
  * `reclaim-api-client` header the backends read, and the `source` field the
- * logs pipeline groups by. The team's rule for identifying which SDK produced a
- * session is a substring check for `browser-extension-sdk`, so these tests
+ * logs pipeline groups by. Identifying which SDK produced a session is a
+ * substring check for `browser-extension-sdk`, so these tests
  * pin the grammar and, above all, that no code path can produce a string
  * missing that marker.
  */
@@ -60,7 +60,7 @@ describe("buildClientSource", () => {
 });
 
 describe("getClientSource", () => {
-  it("always contains the SDK marker the team's check looks for", () => {
+  it("always contains the SDK marker the identification check looks for", () => {
     resetClientSourceCache();
     const source = getClientSource();
     assert.ok(

@@ -114,9 +114,7 @@ const commonResolve = {
   },
 };
 
-// Opt-in only, and note the polarity: this used to be `=== "false"`, so setting
-// DROP_CONSOLE=false *enabled* console stripping and there was no way to ask for
-// it by name. Consoles are the SDK's local debugging surface (see
+// Opt-in only: consoles are the SDK's local debugging surface (see
 // DEFAULT_LOG_CONFIG.consoleEnabled), so stripping them must be deliberate.
 const DROP_CONSOLE = process.env.DROP_CONSOLE === "true";
 
@@ -129,10 +127,15 @@ const commonOptimization = {
     }),
   ],
   splitChunks: false,
+  // Usage-order ids. The default hashes module paths, which carry Bun's per-install store hash,
+  // so the same sources built from another lockfile (the public mirror) would differ.
+  moduleIds: "natural",
+  chunkIds: "natural",
 };
 
 const commonPlugins = [
-  new webpack.ProgressPlugin(),
+  // Progress is useful interactively, but emits hundreds of lines per compiler in CI.
+  ...(process.stderr.isTTY && !process.env.CI ? [new webpack.ProgressPlugin()] : []),
   new webpack.EnvironmentPlugin(["NODE_ENV"]),
   new webpack.DefinePlugin({
     "process.env.NODE_ENV": JSON.stringify(env.NODE_ENV),
@@ -184,12 +187,6 @@ const extensionConfig = {
       "interceptor",
       "network-interceptor.js",
     ),
-    "interceptor/injection-scripts": path.join(
-      __dirname,
-      "src",
-      "interceptor",
-      "injection-scripts.js",
-    ),
     offscreen: path.join(__dirname, "src", "offscreen", "offscreen.js"),
   },
   output: {
@@ -216,13 +213,19 @@ const extensionConfig = {
       patterns: [
         { from: "public", to: path.join(__dirname, "build"), force: true, noErrorOnMissing: true },
         {
-          from: "src/content/components/reclaim-provider-verification-popup.css",
-          to: path.join(__dirname, "build", "content", "components"),
+          // The widget's stylesheet, loaded into its shadow root; order matters for the cascade.
+          from: "src/ui/{tokens,base,widget}.css",
+          // transformAll resolves `to` against the output path, so it stays relative.
+          to: "content/components/reclaim-provider-verification-popup.css",
           force: true,
+          transformAll: (assets) =>
+            ["tokens", "base", "widget"]
+              .map((name) => assets.find((a) => a.sourceFilename.endsWith(`ui/${name}.css`)).data)
+              .join("\n"),
         },
         {
-          from: "src/content/components/reclaim-provider-verification-popup.html",
-          to: path.join(__dirname, "build", "content", "components"),
+          from: path.resolve(__dirname, "../../design/fonts"),
+          to: path.join(__dirname, "build", "fonts"),
           force: true,
         },
         {

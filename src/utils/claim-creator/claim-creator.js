@@ -132,9 +132,6 @@ export const createClaimObject = async (
     throw new Error(`Failed to initialize offscreen document: ${error.message}`);
   }
 
-  // Generate appropriate user agent for the platform
-  // const userAgent = await generateChromeAndroidUserAgent();
-
   const userAgent =
     (typeof navigator !== "undefined" && navigator.userAgent) || generateChromeAndroidUserAgent();
 
@@ -217,10 +214,6 @@ export const createClaimObject = async (
   // Extract dynamic parameters from various sources
   let allParamValues = {};
 
-  if (request?.extractedParams && typeof request.extractedParams === "object") {
-    allParamValues = { ...allParamValues, ...request.extractedParams };
-  }
-
   // 1. Extract params from URL if provider has URL template
   if (providerData.urlType === "TEMPLATE" && request.url) {
     // append the extracted parameters to the existing allParamValues
@@ -254,15 +247,7 @@ export const createClaimObject = async (
     );
   }
 
-  // 4. Explicit extractedParams (e.g. from a customInjection request
-  // middleware) take precedence over anything auto-derived above — a
-  // declared URL/body template regex can't express e.g. a fixed-length
-  // split of a path segment, so an injected script's precise value must win.
-  if (request?.extractedParams && typeof request.extractedParams === "object") {
-    allParamValues = { ...allParamValues, ...request.extractedParams };
-  }
-
-  // 5. Separate parameters into public and secret, by NAME only — matching
+  // 4. Separate parameters into public and secret, by NAME only — matching
   // InApp's `_getHttpParams`/`_getSecretParams`, which split on the name
   // containing "SECRET" and nothing else.
   //
@@ -338,8 +323,8 @@ export const createClaimObject = async (
   // NOTE: `responseSelections` is deliberately NOT copied into params. It is a
   // legacy provider field with no counterpart in the attestor's
   // HttpProviderParameters schema, and that schema is `additionalProperties:
-  // false` — so including it made every claim for such a provider fail
-  // validation at the attestor. InApp does not send it either.
+  // false`, so including it would fail validation at the attestor. InApp does
+  // not send it either.
 
   if (providerData.additionalClientOptions) {
     params.additionalClientOptions = providerData.additionalClientOptions;

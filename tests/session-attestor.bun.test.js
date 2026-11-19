@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { ZKTLS_EXTENSION_ORIGIN_ALLOWLIST } from "@umia/types/zktls-self-host";
+import { ZKTLS_EXTENSION_ORIGIN_ALLOWLIST } from "@umia/zktls-config/self-host";
 
 globalThis.window = globalThis.window || globalThis;
 const { proto } = await import("@reclaimprotocol/attestor-core/browser");
@@ -18,17 +18,6 @@ const route = {
     expectedEpoch: 1,
     authorityDigest: `sha256:${"c".repeat(64)}`,
   },
-  authority: {
-    environment: "devnet",
-    chainId: 10143,
-    beaconAddress: `0x${"b".repeat(40)}`,
-    epoch: 1,
-    attestorUrl: profile.attestorUrl,
-    witnesses: [`0x${"a".repeat(40)}`],
-    minimumWitnesses: 1,
-    digest: `sha256:${"c".repeat(64)}`,
-    validUntil: new Date((second + 600) * 1000).toISOString(),
-  },
 };
 
 function bound(id, marker = "a") {
@@ -36,7 +25,6 @@ function bound(id, marker = "a") {
     sessionId: id,
     route,
     umia: {
-      providerVersion: "v1",
       sessionToken: marker.repeat(64),
       expiresAt: new Date((second + 600) * 1000).toISOString(),
       attestorAuth: {
@@ -163,12 +151,9 @@ describe("pinned browser AttestorClient bound sockets", () => {
     const malformed = bound("malformed");
     malformed.umia.attestorAuth.signature = "0xabc";
     expect(() => sessions.open(malformed)).toThrow("ATTESTOR_AUTH_FAILED");
-    const beyondAuthority = bound("beyond-authority");
-    beyondAuthority.route = {
-      ...route,
-      authority: { ...route.authority, validUntil: new Date((second + 200) * 1000).toISOString() },
-    };
-    expect(() => sessions.open(beyondAuthority)).toThrow("ATTESTOR_AUTH_FAILED");
+    const beyondSession = bound("beyond-session");
+    beyondSession.umia.expiresAt = new Date((second + 200) * 1000).toISOString();
+    expect(() => sessions.open(beyondSession)).toThrow("ATTESTOR_AUTH_FAILED");
     expect(sockets).toHaveLength(0);
     const handle = sessions.open(bound("private-run"));
     expect(handle.client.metadata).toBeDefined();

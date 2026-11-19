@@ -207,7 +207,7 @@ describe("no user data is printed at the default level", () => {
     name: "http",
     params: {
       url: "https://etherscan.io/myaccount",
-      paramValues: { etherscanaccount: "sajjad21990" },
+      paramValues: { etherscanaccount: "exampleuser" },
     },
     secretParams: {
       cookieStr: "ASP.NET_SessionId=deadbeef; etherscan_pwd=hunter2",
@@ -222,8 +222,8 @@ describe("no user data is printed at the default level", () => {
     identifier: "0xe46c982a",
     claimData: {
       provider: "http",
-      parameters: JSON.stringify({ paramValues: { username: "sajjad21990" } }),
-      context: JSON.stringify({ extractedParameters: { username: "sajjad21990" } }),
+      parameters: JSON.stringify({ paramValues: { username: "exampleuser" } }),
+      context: JSON.stringify({ extractedParameters: { username: "exampleuser" } }),
       owner: "0xowner",
     },
     signatures: ["0x0ed30f08"],
@@ -237,7 +237,7 @@ describe("no user data is printed at the default level", () => {
     "ASP.NET_SessionId=deadbeef",
     "etherscan_pwd=hunter2",
     "tok-abc123",
-    "sajjad21990",
+    "exampleuser",
     "0xsignaturevalue",
     "scraped-display-name",
   ];
@@ -260,7 +260,7 @@ describe("no user data is printed at the default level", () => {
 
   it("blanks claimData wholesale in a submitted proof", () => {
     const line = printed("[BACKGROUND] Submitting proofs", "background.proof", [PROOF]);
-    assert.ok(!line.includes("sajjad21990"));
+    assert.ok(!line.includes("exampleuser"));
     assert.ok(!line.includes("extractedParameters"), "not even the key");
     assert.ok(line.includes("[REDACTED]"));
     assert.ok(line.includes("0xe46c982a"), "the identifier survives");
@@ -279,9 +279,9 @@ describe("no user data is printed at the default level", () => {
     const line = printed(
       "[PARAM-EXTRACTOR] responseMatch #0 resolved via template: userName(len=11)",
       "claim.params",
-      { extractedParameters: { userName: "sajjad21990" } },
+      { extractedParameters: { userName: "exampleuser" } },
     );
-    assert.ok(!line.includes("sajjad21990"));
+    assert.ok(!line.includes("exampleuser"));
     assert.ok(line.includes("len=11"));
   });
 });

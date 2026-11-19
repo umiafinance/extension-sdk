@@ -1,21 +1,13 @@
 /**
- * The popup's claim counter, for the case that broke it.
+ * The popup's claim counter across a multi-origin provider.
  *
- * Session 2b46b57c39 ran the `example` provider: three requestData entries
- * across three ORIGINS (example.org -> example.com -> jsonplaceholder). All
- * three claims and proofs succeeded, but the popup showed `1/1`, flashed
- * `2/1`, and settled back on `1/1`.
+ * The `example` provider has three requestData entries across three ORIGINS
+ * (example.org -> example.com -> jsonplaceholder). The popup belongs to the
+ * content script, which Chrome tears down and rebuilds at `document_start` on
+ * every navigation, so it can only see the events that arrive after it exists.
  *
- * The cause was not the counting logic — it was WHERE the counting lived. The
- * popup belongs to the content script, which Chrome tears down and rebuilds at
- * `document_start` on every navigation, so each new page got a fresh
- * `{ totalClaims: 0, completedClaims: 0 }` and could only see the events that
- * arrived after it existed. The last page saw one claim request and three proof
- * successes: 1/1, 2/1, 3/1 — then `showSuccess()` printed
- * `totalClaims/totalClaims`, i.e. 1/1 again.
- *
- * These tests pin the replacement: the background computes progress from state
- * that survives navigation, and the popup only renders it.
+ * These tests pin the design: the background computes progress from state that
+ * survives navigation, and the popup only renders it.
  */
 
 import { describe, it } from "node:test";
@@ -46,9 +38,7 @@ describe("claimProgress", () => {
   });
 
   it("never reports more completed than total", () => {
-    // What produced the nonsensical `2/1`. With expectManyClaims a provider
-    // script can generate more claims than requestData declares, so the total
-    // grows to meet them instead of the counter overflowing.
+    // The total grows to meet the completed count, so the counter never reads `4/3`.
     assert.deepEqual(claimProgress(ctx(4, 3)), { completed: 4, total: 4 });
   });
 

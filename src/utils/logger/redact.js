@@ -31,9 +31,8 @@ const SENSITIVE_KEY_PATTERNS = [
  * Keys whose values are user data: keep the key names, drop the values.
  *
  * These are matched whatever the value's TYPE is. That matters because the
- * attestor hands several of them back as JSON *strings* rather than objects —
- * `claim.parameters` is a serialised blob holding `paramValues`, and a
- * string-only-if-object check let the whole thing through untouched.
+ * attestor hands several of them back as JSON *strings* rather than objects:
+ * `claim.parameters` is a serialised blob holding `paramValues`.
  */
 const USER_DATA_KEYS = ["parameters", "paramvalues", "publicdata", "witnessparameters"];
 

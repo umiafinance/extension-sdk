@@ -1,12 +1,8 @@
 /**
  * Shared JSON helpers for the content-script request filter.
  *
- * The xPath/jsonPath value extractors that used to live here are gone: they
- * diverged from the attestor (a regex-on-tag-name "XPath", and a JSONPath that
- * returned a re-serialized JS value rather than the raw response slice), which
- * meant a provider path that worked in the attestor and the InApp SDK could
- * silently fail here. Authoritative extraction now lives in
- * ./attestor-extraction.js on top of the vendored attestor code.
+ * Authoritative extraction lives in ./attestor-extraction.js on top of the
+ * vendored attestor code.
  */
 
 import { JSONPath } from "jsonpath-plus";

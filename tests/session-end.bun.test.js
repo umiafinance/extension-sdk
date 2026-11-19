@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "bun:test";
-import { ZKTLS_EXTENSION_ORIGIN_ALLOWLIST } from "@umia/types/zktls-self-host";
+import { ZKTLS_EXTENSION_ORIGIN_ALLOWLIST } from "@umia/zktls-config/self-host";
 import { TAB_TRANSITION_DELAY_MS } from "../src/utils/constants/config.js";
 import {
   MESSAGE_ACTIONS,
@@ -21,13 +21,9 @@ const session = {
     callerOrigin: profile.callerOrigin,
     backendUrl: profile.backendUrl,
     attestorUrl: profile.attestorUrl,
-    authority: {
-      digest: `sha256:${"c".repeat(64)}`,
-      validUntil: new Date((now + 600) * 1000).toISOString(),
-    },
+    network: { environment: "devnet", chainId: 10143, authorityDigest: `sha256:${"c".repeat(64)}` },
   },
   umia: {
-    providerVersion: "v1",
     sessionToken: "a".repeat(64),
     expiresAt: new Date((now + 600) * 1000).toISOString(),
     attestorAuth: {
@@ -45,14 +41,14 @@ const binding = Object.freeze({
   sessionId: ID,
   tabId: CALLER_TAB,
   extensionId: "test-extension",
-  documentId: "hub-document",
+  documentId: "caller-document",
   profile: profile.profile,
 });
 const callerSender = {
   id: "test-extension",
   tab: { id: CALLER_TAB },
   frameId: 0,
-  documentId: "hub-document",
+  documentId: "caller-document",
   url: `${profile.callerOrigin}/auction/1`,
   origin: profile.callerOrigin,
 };
@@ -88,7 +84,6 @@ function context() {
     MESSAGE_SOURCES,
     RECLAIM_SESSION_STATUS,
     EVENT_TYPES,
-    expectManyClaims: false,
     aborted: false,
     sessionId: ID,
     activeSessionId: ID,
@@ -124,9 +119,11 @@ function context() {
   return ctx;
 }
 
-test("an unmet response criterion ends the bound session and returns to the Hub", async () => {
+test("an unmet response criterion ends the bound session at once and returns to the caller", async () => {
   const ctx = context();
-  ctx.providerData = { requestData: [{ requestHash: "request-one" }, { requestHash: "request-two" }] };
+  ctx.providerData = {
+    requestData: [{ requestHash: "request-one" }, { requestHash: "request-two" }],
+  };
   ctx.responseMatchFailures = new Set();
   ctx.filteredRequests = new Map();
   ctx.firstRequestReceived = false;
@@ -150,41 +147,51 @@ test("an unmet response criterion ends the bound session and returns to the Hub"
     );
     return response;
   };
-  assert.deepEqual(
-    await send(
+  const miss = (requestHash, sender) =>
+    send(
       MESSAGE_ACTIONS.RESPONSE_MATCH_RESULT,
-      { sessionId: ID, requestHash: "request-two", failed: true },
-      { ...providerSender, tab: { id: 99 } },
-    ),
-    { success: false, error: "REQUEST_REJECTED" },
-  );
+      { sessionId: ID, requestHash, failed: true },
+      sender,
+    );
+
+  // Only the live provider tab, a signed frame, and a recipe entry of the active session count.
+  const refused = { success: false, error: "REQUEST_REJECTED" };
+  assert.deepEqual(await miss("request-two", { ...providerSender, tab: { id: 99 } }), refused);
   assert.deepEqual(
-    await send(MESSAGE_ACTIONS.RESPONSE_MATCH_RESULT, {
-      sessionId: ID,
-      requestHash: "other",
-      failed: true,
+    await miss("request-two", {
+      ...providerSender,
+      frameId: 1,
+      origin: "https://unapproved.example",
+      url: "https://unapproved.example/",
     }),
-    { success: false, error: "REQUEST_REJECTED" },
+    refused,
   );
-  assert.equal(missingRequestCode(ctx), "REQUEST_NOT_CAPTURED");
-  assert.deepEqual(timerOps, []);
-  assert.equal(ctx.activeSessionId, ID);
+  assert.deepEqual(await miss("other"), refused);
   assert.deepEqual(
     await send(MESSAGE_ACTIONS.RESPONSE_MATCH_RESULT, {
-      sessionId: ID,
+      sessionId: "stale",
       requestHash: "request-two",
       failed: true,
     }),
-    { success: true },
+    refused,
   );
+  assert.equal(ctx.activeSessionId, ID);
+  assert.deepEqual(ctx.statuses, []);
+
+  // An entry that already has a proof is settled; a miss for it is ignored.
+  assert.deepEqual(await miss("request-one"), { success: true });
+  assert.equal(ctx.responseMatchFailures.has("request-one"), false);
+  assert.equal(ctx.activeSessionId, ID);
+
+  // A claim in flight keeps its chance: the miss is recorded for the session timer instead.
+  ctx.filteredRequests.set("request-two", { url: "https://fixture.example/" });
+  assert.deepEqual(await miss("request-two"), { success: true });
+  assert.equal(ctx.activeSessionId, ID);
+  assert.deepEqual(ctx.statuses, []);
   assert.equal(missingRequestCode(ctx), "CRITERIA_NOT_MET");
-  assert.deepEqual(timerOps, ["start"]);
-  await send(MESSAGE_ACTIONS.RESPONSE_MATCH_RESULT, {
-    sessionId: ID,
-    requestHash: "request-two",
-    failed: true,
-  });
-  assert.deepEqual(timerOps, ["start"], "a repeat does not extend the decision window");
+  ctx.generatedProofs.set("request-two", { claim: { identifier: "later-proof" } });
+  assert.equal(missingRequestCode(ctx), "REQUEST_NOT_CAPTURED");
+  ctx.generatedProofs.delete("request-two");
   assert.deepEqual(
     await send(MESSAGE_ACTIONS.RESPONSE_MATCH_RESULT, {
       sessionId: ID,
@@ -194,17 +201,10 @@ test("an unmet response criterion ends the bound session and returns to the Hub"
     { success: true },
   );
   assert.equal(missingRequestCode(ctx), "REQUEST_NOT_CAPTURED");
-  assert.deepEqual(timerOps, ["start", "clear"]);
-  await send(MESSAGE_ACTIONS.RESPONSE_MATCH_RESULT, {
-    sessionId: ID,
-    requestHash: "request-two",
-    failed: true,
-  });
-  assert.deepEqual(timerOps, ["start", "clear", "start"]);
-  ctx.generatedProofs.set("request-two", { claim: { identifier: "later-proof" } });
-  assert.equal(missingRequestCode(ctx), "REQUEST_NOT_CAPTURED");
-  ctx.generatedProofs.delete("request-two");
+  ctx.filteredRequests.delete("request-two");
+  assert.deepEqual(timerOps, [], "a miss never starts or clears the session timer");
 
+  // With nothing in flight the miss is the answer, and the session ends now.
   const tabOps = [];
   const scheduled = [];
   const originalUpdate = chrome.tabs.update;
@@ -221,40 +221,12 @@ test("an unmet response criterion ends the bound session and returns to the Hub"
   };
   sent = [];
   try {
-    assert.deepEqual(
-      await send(
-        MESSAGE_ACTIONS.RESPONSE_MATCH_RESULT,
-        { sessionId: ID, requestHash: "request-two", failed: true },
-        {
-          ...providerSender,
-          frameId: 1,
-          origin: "https://unapproved.example",
-          url: "https://unapproved.example/",
-        },
-      ),
-      { success: false, error: "REQUEST_REJECTED" },
-    );
-    assert.deepEqual(
-      await send(MESSAGE_ACTIONS.RESPONSE_MATCH_RESULT, {
-        sessionId: "stale",
-        requestHash: "request-two",
-        failed: true,
-      }),
-      { success: false, error: "REQUEST_REJECTED" },
-    );
-    await ctx.failSession(missingRequestCode(ctx));
+    assert.deepEqual(await miss("request-two"), { success: true });
     assert.deepEqual(ctx.statuses, [
       [RECLAIM_SESSION_STATUS.PROOF_GENERATION_FAILED, "CRITERIA_NOT_MET"],
     ]);
+    assert.deepEqual(ctx.closed, [ID]);
     assert.equal(ctx.activeSessionId, null);
-    assert.deepEqual(
-      await send(MESSAGE_ACTIONS.RESPONSE_MATCH_RESULT, {
-        sessionId: null,
-        requestHash: "request-two",
-        failed: true,
-      }),
-      { success: false, error: "REQUEST_REJECTED" },
-    );
     assert.equal(
       sent.find(({ tabId }) => tabId === CALLER_TAB)?.message.data.error,
       "CRITERIA_NOT_MET",
@@ -269,6 +241,9 @@ test("an unmet response criterion ends the bound session and returns to the Hub"
       ["update", CALLER_TAB, { active: true }],
       ["remove", PROVIDER_TAB],
     ]);
+    // The provider tab keeps polling after the end; its later misses are refused.
+    assert.deepEqual(await miss("request-two"), refused);
+    assert.deepEqual(ctx.statuses.length, 1);
   } finally {
     chrome.tabs.update = originalUpdate;
     chrome.tabs.remove = originalRemove;
@@ -348,7 +323,7 @@ test.each(pairs)("%s then %s ends the session exactly once", async (firstName, s
   );
   assert.equal(toCaller.length, 1, "the page Promise settles exactly once");
   const [terminal] = toCaller;
-  assert.equal(terminal.options.documentId, "hub-document");
+  assert.equal(terminal.options.documentId, "caller-document");
   if (expected.success) {
     assert.equal(terminal.message.action, MESSAGE_ACTIONS.PROOF_SUBMITTED);
     assert.deepEqual(ctx.statuses, []);
@@ -391,4 +366,36 @@ test("a tab closed while the session is ending leaves the guard to the owner unt
   );
   assert.equal(ctx.activeSessionId, null);
   assert.equal(ctx.initiatingSender, null);
+});
+
+test("a successful submission shows the widget's success state but never sends proofs to the provider tab", async () => {
+  sent = [];
+  const ctx = context();
+  await submitProofs(ctx);
+  const toProvider = sent.filter(({ tabId }) => tabId === PROVIDER_TAB);
+  assert.deepEqual(
+    toProvider.map(({ message, options }) => [message.action, message.data, options]),
+    [[MESSAGE_ACTIONS.PROVIDER_TAB_VERIFIED, {}, { frameId: 0 }]],
+  );
+  assert.ok(
+    sent.some(
+      ({ tabId, message }) =>
+        tabId === CALLER_TAB && message.action === MESSAGE_ACTIONS.PROOF_SUBMITTED,
+    ),
+  );
+});
+
+test("every terminal path tells the consumer once that the session ended", async () => {
+  for (const end of [
+    (ctx) => submitProofs(ctx),
+    (ctx) => ctx.failSession("CRITERIA_NOT_MET"),
+    (ctx) => cancelSession(ctx, ID),
+  ]) {
+    const ctx = context();
+    const ended = [];
+    ctx.onSessionEnd = () => ended.push(ctx.activeSessionId);
+    await end(ctx);
+    await ctx.failSession("UNKNOWN");
+    assert.deepEqual(ended, [null]);
+  }
 });

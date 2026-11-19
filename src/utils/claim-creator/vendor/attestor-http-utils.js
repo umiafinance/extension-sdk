@@ -9,7 +9,7 @@
  * against this copy on every `npm test`.
  *
  * Why still vendored rather than imported now that 5.1.1 exports the
- * extractors (PR #92): `makeRegex` and the `processRedactionRequest` redaction
+ * extractors: `makeRegex` and the `processRedactionRequest` redaction
  * chain are still not in that export set, so local copies are needed either
  * way — and a half-imported, half-copied chain is harder to keep in lockstep
  * than a wholly copied one the parity test can check end to end.

@@ -206,79 +206,57 @@ test("a Fairscale-shaped request inside a signed-host frame is claimed", async (
   assert.equal(processed[0].criteria, fairscale);
 });
 
-test("a provider script's claim names a pinned entry and carries no page criteria", async () => {
+test("an injected-request entry is never claimable, by any message", async () => {
   const { processed, send } = harness();
-  const injected = {
-    url: injectable.url,
-    method: "GET",
-    headers: { Cookie: "page=chosen" },
-    extractedParams: { ethglobalhackathon: "abc-123", count: 3 },
-  };
-  assert.equal(
-    (
-      await send(MESSAGE_ACTIONS.REQUEST_CLAIM, {
-        requestHash: injectable.requestHash,
-        request: injected,
-      })
-    ).success,
-    true,
-  );
-  assert.equal(processed[0].criteria, injectable);
-  assert.deepEqual(processed[0].request.headers, {});
-  assert.deepEqual(processed[0].request.extractedParams, { ethglobalhackathon: "abc-123" });
-
-  for (const data of [
-    { request: injected },
-    { requestHash: injectable.requestHash, request: { ...injected, url: "https://evil.example/" } },
-    { requestHash: injectable.requestHash, request: { ...injected, method: "POST" } },
-  ]) {
-    const before = processed.length;
-    assert.equal((await send(MESSAGE_ACTIONS.REQUEST_CLAIM, data)).success, false);
-    assert.equal(processed.length, before);
+  const injected = { url: injectable.url, method: "GET", responseText: '{"id":"abc-123"}' };
+  for (const action of ["REQUEST_CLAIM", MESSAGE_ACTIONS.FILTERED_REQUEST_FOUND]) {
+    const reply = await send(action, { requestHash: injectable.requestHash, request: injected });
+    assert.notEqual(reply?.success, true);
   }
+  assert.equal(processed.length, 0);
 });
 
 const read = (path) => JSON.parse(readFileSync(new URL(path, import.meta.url), "utf8"));
-const bench = read("../../providers/src/providers/fixtures/reclaim-bench.json");
-const benchConfig = (id) => bench[id].configs.providers[0];
+const shapes = read("./fixtures/reclaim-provider-shapes.json");
+const providerShape = (id) => shapes[id];
 
 // Published recipes as served, each with a request and response a real session observes.
 const PUBLISHED = [
   {
     name: "ETHGlobal",
-    config: benchConfig("ethglobal"),
+    config: providerShape("ethglobal"),
     request: {
       url: "https://api2.ethglobal.com/graphql",
       method: "POST",
-      body: benchConfig("ethglobal").requestData[0].bodySniff.template,
+      body: providerShape("ethglobal").requestData[0].bodySniff.template,
       responseText:
         '{"data":{"getUserSelf":{"uuid":"eg-user-1"},"getAttendeeSelf":[{"id":"a1","hackers":[]}]}}',
     },
   },
   {
     name: "Devfolio",
-    config: benchConfig("devfolio"),
+    config: providerShape("devfolio"),
     request: {
       url: "https://api.devfolio.co/v1/graphql",
       method: "POST",
-      body: benchConfig("devfolio").requestData[0].bodySniff.template,
+      body: providerShape("devfolio").requestData[0].bodySniff.template,
       responseText: '{"data":{"me":{"uuid":"df-user-1","user_hackathons":[{"uuid":"h1"}]}}}',
     },
   },
   {
     name: "Fairscale twin",
-    config: benchConfig("tw-fairscale"),
+    config: providerShape("tw-fairscale"),
     sender: fairscaleFrame,
     request: {
       url: "https://fairscale.xyz/api/embed/authorize",
       method: "POST",
       body: '{"appId":"umia-finance","wallet":"W","token":"T","privyUserId":"P"}',
-      responseText: '{"authorized":false,"wallet":"F5QrKJ6xDe9z4YGAwYap6E8jgrtbC5whYqJK3urAKMWm"}',
+      responseText: '{"authorized":false,"wallet":"SyntheticTestWa11et1111111111111111111111111"}',
     },
   },
   {
     name: "GitHub",
-    config: benchConfig("github"),
+    config: providerShape("github"),
     request: {
       url: "https://github.com/settings/profile",
       method: "GET",

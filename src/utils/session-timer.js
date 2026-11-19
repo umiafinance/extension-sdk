@@ -6,9 +6,7 @@
 import { SESSION_TIMER_DURATION_MS } from "./constants/config";
 import { atDeadline } from "./at-deadline";
 // Safe to import directly: background.js is the only importer of this module, so
-// this cannot start the hub in a consumer page. These lines used to be bare
-// console.log — the one part of the flow visible locally and unqueryable
-// remotely, ignoring both consoleEnabled and logLevel.
+// this cannot start the hub in a consumer page.
 import { loggingHub } from "./logger/LoggingHub";
 import { EVENT_TYPES } from "./logger/constants";
 

@@ -1,9 +1,7 @@
 /**
- * The bridge is the only route MAIN-world diagnostics have to the endpoint:
+ * The bridge is the only route MAIN-world diagnostics have to the LoggingHub:
  * the interceptor and injection scripts run in the page's world, where there is
- * no `chrome.runtime`. Before it existed, every line from the interception
- * layer — the most failure-prone stage of the flow — went to the page console
- * and nowhere else.
+ * no `chrome.runtime`.
  *
  * These tests use a fake `window`, since the module only needs `postMessage`
  * and `addEventListener`.
@@ -70,7 +68,7 @@ describe("createPageLogger", () => {
     for (const method of ["log", "info", "warn", "error", "debug"]) {
       assert.equal(typeof logger[method], "function", `missing ${method}`);
     }
-    // The old local `debug` object treated .log as verbose output.
+    // .log is verbose output.
     logger.log("legacy call site");
     assert.equal(posted[0].data.level, "FINE");
   });
@@ -85,8 +83,8 @@ describe("createPageLogger", () => {
   });
 
   it("sends objects as a structured payload, not stringified into the message", () => {
-    // Stringifying here would push the value past the hub's redaction straight
-    // to the endpoint. The object has to travel as an object.
+    // Stringifying here would push the value past the hub's redaction. The
+    // object has to travel as an object.
     const logger = createPageLogger("interceptor", "interceptor.network");
     logger.info("request", { url: "https://x/y", method: "GET" });
 

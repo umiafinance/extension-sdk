@@ -46,16 +46,13 @@ export const PROOF_GENERATION_TIMEOUT_MS = 120000; // 2 minutes
  * Max time the background waits for the offscreen document's response (ms).
  *
  * **Must stay strictly greater than PROOF_GENERATION_TIMEOUT_MS**, hence the
- * derivation rather than a literal. It was 60s against an inner 120s, so the
- * outer timeout always won: a proof that legitimately needed 60–120s was killed
- * by the background while the offscreen document was still working, and the
- * inner timeout could never surface at all. The session then failed with the
- * vaguer "Timeout waiting for offscreen document" instead of the offscreen's
- * own "Proof generation timed out after 120 seconds".
+ * derivation rather than a literal: otherwise the background kills a proof the
+ * offscreen document is still working on, and the offscreen's own, more
+ * specific timeout never surfaces.
  *
  * The headroom covers the PROOF_GENERATION_FAILED `updateSessionStatus` POST
  * the offscreen makes on its way out, plus the chrome-messaging hop. This
- * timeout is now only a backstop for an offscreen document that died without
+ * timeout is only a backstop for an offscreen document that died without
  * answering at all.
  */
 export const PROOF_RESPONSE_TIMEOUT_MS = PROOF_GENERATION_TIMEOUT_MS + 15000; // 2m15s

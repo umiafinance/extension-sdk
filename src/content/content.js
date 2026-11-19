@@ -37,9 +37,15 @@ const CONTENT_SCRIPT_INSTALL_KEY = Symbol.for("umia.reclaim.content-script-insta
 const firstInstall = !globalThis[CONTENT_SCRIPT_INSTALL_KEY];
 if (firstInstall) globalThis[CONTENT_SCRIPT_INSTALL_KEY] = true;
 
+// Clears a key that SDK versions before 0.5.0 could leave in this site's localStorage.
+if (firstInstall) {
+  try {
+    localStorage.removeItem("reclaimBrowserExtensionParameters");
+  } catch {}
+}
+
 let shouldInitialize = false;
 let interceptorInjected = false;
-let injectionScriptInjected = false;
 
 // Function to inject the network interceptor - will be called conditionally
 const injectNetworkInterceptor = function () {
@@ -104,81 +110,11 @@ const injectNetworkInterceptor = function () {
   }
 };
 
-// Function to inject the injection scripts - similar to network interceptor
-const injectDynamicInjectionScript = function () {
-  if (injectionScriptInjected) return;
-
-  try {
-    const script = document.createElement("script");
-    script.src = chrome.runtime.getURL(
-      "reclaim-browser-extension-sdk/interceptor/injection-scripts.bundle.js",
-    );
-    script.type = "text/javascript";
-
-    // Set highest priority attributes
-    script.async = false;
-    script.defer = false;
-
-    // Try to inject as early as possible
-    let injected = false;
-
-    // Function to actually inject the script with highest priority
-    const injectNow = () => {
-      if (injected) return;
-
-      if (document.documentElement) {
-        // Use insertBefore for highest priority injection
-        document.documentElement.insertBefore(script, document.documentElement.firstChild);
-        injected = true;
-        injectionScriptInjected = true;
-      } else if (document.head) {
-        document.head.insertBefore(script, document.head.firstChild);
-        injected = true;
-        injectionScriptInjected = true;
-      } else if (document) {
-        document.appendChild(script);
-        injected = true;
-        injectionScriptInjected = true;
-      }
-    };
-
-    // Try to inject immediately
-    injectNow();
-
-    // Also set up a MutationObserver as a fallback
-    if (!injected) {
-      const observer = new MutationObserver(() => {
-        if (!injected && (document.documentElement || document.head)) {
-          injectNow();
-          if (injected) {
-            observer.disconnect();
-          }
-        }
-      });
-
-      // Observe document for any changes at the earliest possible moment
-      observer.observe(document, { childList: true, subtree: true });
-    }
-
-    return script; // Return script element to prevent garbage collection
-  } catch (e) {
-    return null;
-  }
-};
-
-function clearSessionParameters() {
-  try {
-    localStorage.removeItem("reclaimBrowserExtensionParameters");
-    window.postMessage({ action: "RECLAIM_PARAMETERS_CLEAR" }, "*");
-  } catch {}
-}
-
 // Always forward proof completion/failure to the page, even in non-managed tabs
 if (firstInstall) try {
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const { action, data } = message || {};
     if (action === MESSAGE_ACTIONS.PROOF_SUBMITTED) {
-      clearSessionParameters();
       try {
         const proofs = data?.formattedProofs || data?.proof || data;
         window.postMessage(
@@ -199,7 +135,6 @@ if (firstInstall) try {
       action === MESSAGE_ACTIONS.PROOF_GENERATION_FAILED ||
       action === MESSAGE_ACTIONS.SESSION_CANCELLED
     ) {
-      clearSessionParameters();
       try {
         window.postMessage(
           {
@@ -238,7 +173,6 @@ if (firstInstall) void (async function () {
             if (resp.injectionType !== "NONE") {
               injectNetworkInterceptor();
             }
-            injectDynamicInjectionScript();
           }
         },
       );
@@ -265,7 +199,6 @@ if (firstInstall) void (async function () {
           if (data.injectionType !== "NONE") {
             injectNetworkInterceptor();
           }
-          injectDynamicInjectionScript();
 
           if (!window.reclaimContentScript) {
             window.reclaimContentScript = new ReclaimContentScript();
@@ -304,6 +237,7 @@ class ReclaimContentScript {
     this.cleanupInterval = null;
     this.filteringStartTime = null;
     this.filteredRequests = [];
+    this.matchedResponses = [];
     this.isFiltering = false;
     this.stopStoringInterceptions = false;
 
@@ -347,8 +281,7 @@ class ReclaimContentScript {
    * Push the log config down into the page world.
    *
    * The MAIN-world bridge cannot read chrome.storage, so without this its
-   * console mirroring would ignore `consoleEnabled` entirely — which is how the
-   * interceptor ended up logging on every page regardless of configuration.
+   * console mirroring would ignore `consoleEnabled` entirely.
    * Called once at init and again whenever the stored config changes.
    */
   pushLogConfigToPage(config) {
@@ -425,19 +358,7 @@ class ReclaimContentScript {
                 "content.provider",
               );
 
-              localStorage.setItem(
-                "reclaimBrowserExtensionParameters",
-                JSON.stringify(this.parameters || {}),
-              );
-              window.postMessage(
-                {
-                  action: RECLAIM_SDK_ACTIONS.PARAMETERS_UPDATE,
-                  data: { parameters: this.parameters || {} },
-                },
-                "*",
-              );
-
-              this.requestBoundInjection();
+              this.requestBoundRequestChain();
               this.requestBoundReplay();
               this.watchUrlForReplay();
 
@@ -463,10 +384,9 @@ class ReclaimContentScript {
         // Only process provider data if this is a managed tab
         if (!this.isManagedTab) {
           // Not an exception: PROVIDER_DATA_READY is broadcast, so the content
-          // script in the *originating* tab correctly declines it. Tagging this
-          // TAB_NOT_MANAGED_BY_EXTENSION_EXCEPTION put an exception event in
-          // every healthy session. The event stays on the real failure, where
-          // messageRouter rejects a request from an unmanaged tab.
+          // script in the *originating* tab correctly declines it. The exception
+          // event belongs to the real failure, where messageRouter rejects a
+          // request from an unmanaged tab.
           logger.debug("[Content] Ignoring provider data: tab is not managed", "content.tab");
           sendResponse({ success: false, message: "Tab is not managed by extension" });
           break;
@@ -478,19 +398,7 @@ class ReclaimContentScript {
         this.providerId = data.providerId || "unknown";
         this.appId = data.appId || "unknown";
 
-        localStorage.setItem(
-          "reclaimBrowserExtensionParameters",
-          JSON.stringify(this.parameters || {}),
-        );
-        window.postMessage(
-          {
-            action: RECLAIM_SDK_ACTIONS.PARAMETERS_UPDATE,
-            data: { parameters: this.parameters || {} },
-          },
-          "*",
-        );
-
-        this.requestBoundInjection();
+        this.requestBoundRequestChain();
         this.requestBoundReplay();
         this.watchUrlForReplay();
 
@@ -620,7 +528,6 @@ class ReclaimContentScript {
         break;
 
       case MESSAGE_ACTIONS.PROOF_GENERATION_FAILED:
-        clearSessionParameters();
         try {
           window.postMessage(
             {
@@ -641,7 +548,6 @@ class ReclaimContentScript {
         break;
 
       case MESSAGE_ACTIONS.PROOF_SUBMITTED:
-        clearSessionParameters();
         try {
           const proofs = data?.formattedProofs || data?.proof || data;
           window.postMessage(
@@ -662,8 +568,14 @@ class ReclaimContentScript {
         sendResponse({ success: true });
         break;
 
+      case MESSAGE_ACTIONS.PROVIDER_TAB_VERIFIED:
+        if (this.verificationPopup) {
+          this.verificationPopup.handleProofSubmitted();
+        }
+        sendResponse({ success: true });
+        break;
+
       case MESSAGE_ACTIONS.PROOF_SUBMISSION_FAILED:
-        clearSessionParameters();
         // Also forward failure to the page
         try {
           window.postMessage(
@@ -713,10 +625,10 @@ class ReclaimContentScript {
     if (event.source !== window) return;
     const { action, data, messageId, extensionID } = event.data;
 
-    // MAIN-world log relay. The interceptor and injection scripts have no
-    // chrome.runtime, so this is the only route their diagnostics have to the
-    // hub. Relayed with the originating context, not "content", so the log
-    // still says where interception actually failed.
+    // MAIN-world log relay. The interceptor has no chrome.runtime, so this is
+    // the only route its diagnostics have to the LoggingHub. Relayed with the
+    // originating context, not "content", so the log still says where
+    // interception actually failed.
     //
     // Any page can post this, so only a provider tab relays it; the background
     // accepts relayed logs from managed and caller tabs only.
@@ -802,17 +714,6 @@ class ReclaimContentScript {
           // Store parameters and session ID for later use
           if (data.parameters) {
             this.parameters = data.parameters;
-            localStorage.setItem(
-              "reclaimBrowserExtensionParameters",
-              JSON.stringify(this.parameters || {}),
-            );
-            window.postMessage(
-              {
-                action: RECLAIM_SDK_ACTIONS.PARAMETERS_UPDATE,
-                data: { parameters: this.parameters || {} },
-              },
-              "*",
-            );
           }
 
           if (data.sessionId) {
@@ -872,126 +773,6 @@ class ReclaimContentScript {
         () => {},
       );
       logger.info("[Content] Verification cancelled", "content.verification");
-    }
-
-    if (action === RECLAIM_SDK_ACTIONS.SET_PUBLIC_DATA && data?.publicData !== null) {
-      this.publicData = String(data?.publicData);
-      chrome.runtime.sendMessage(
-        {
-          action: MESSAGE_ACTIONS.UPDATE_PUBLIC_DATA,
-          source: MESSAGE_SOURCES.CONTENT_SCRIPT,
-          target: MESSAGE_SOURCES.BACKGROUND,
-          data: { publicData: this.publicData },
-        },
-        // eslint-disable-next-line @typescript-eslint/no-empty-function
-        () => {},
-      );
-      logger.info("[Content] Public data set", "content.data");
-      return;
-    }
-
-    if (
-      action === RECLAIM_SDK_ACTIONS.SET_EXPECT_MANY_CLAIMS &&
-      typeof data?.expectMany === "boolean"
-    ) {
-      chrome.runtime.sendMessage(
-        {
-          action: MESSAGE_ACTIONS.UPDATE_EXPECT_MANY_CLAIMS,
-          source: MESSAGE_SOURCES.CONTENT_SCRIPT,
-          target: MESSAGE_SOURCES.BACKGROUND,
-          data: { expectMany: !!data.expectMany },
-        },
-        // eslint-disable-next-line @typescript-eslint/no-empty-function
-        () => {},
-      );
-      logger.info("[Content] Expect many claims set", "content.claim");
-      return;
-    }
-
-    if (action === RECLAIM_SDK_ACTIONS.PARAMETERS_GET) {
-      chrome.runtime.sendMessage(
-        {
-          action: MESSAGE_ACTIONS.GET_PARAMETERS,
-          source: MESSAGE_SOURCES.CONTENT_SCRIPT,
-          target: MESSAGE_SOURCES.BACKGROUND,
-          data: {},
-        },
-        (resp) => {
-          const params = resp?.success ? resp.parameters || {} : this.parameters || {};
-          this.parameters = params;
-          localStorage.setItem(
-            "reclaimBrowserExtensionParameters",
-            JSON.stringify(this.parameters || {}),
-          );
-          window.postMessage(
-            { action: RECLAIM_SDK_ACTIONS.PARAMETERS_UPDATE, data: { parameters: params } },
-            "*",
-          );
-        },
-      );
-      // FINE: the background logs the same event, and a provider script can
-      // call getParametersSync() on every render.
-      logger.debug("[Content] Parameters get", "content.data");
-      return;
-    }
-
-    // Whenever you set this.parameters (e.g., after REQUEST_PROVIDER_DATA, PROVIDER_DATA_READY, or SET_PARAMETERS), also:
-    if (action === RECLAIM_SDK_ACTIONS.SET_PARAMETERS) {
-      this.parameters = data?.parameters || {};
-      localStorage.setItem(
-        "reclaimBrowserExtensionParameters",
-        JSON.stringify(this.parameters || {}),
-      );
-      window.postMessage(
-        {
-          action: RECLAIM_SDK_ACTIONS.PARAMETERS_UPDATE,
-          data: { parameters: this.parameters || {} },
-        },
-        "*",
-      );
-    }
-
-    if (action === RECLAIM_SDK_ACTIONS.REPORT_PROVIDER_ERROR && data?.message) {
-      chrome.runtime.sendMessage(
-        {
-          action: MESSAGE_ACTIONS.REPORT_PROVIDER_ERROR,
-          source: MESSAGE_SOURCES.CONTENT_SCRIPT,
-          target: MESSAGE_SOURCES.BACKGROUND,
-          data: { message: String(data.message) },
-        },
-        // eslint-disable-next-line @typescript-eslint/no-empty-function
-        () => {},
-      );
-      logger.info("[Content] Provider error reported", "content.provider");
-
-      return;
-    }
-
-    // The background takes the criteria from the pinned recipe entry this names.
-    if (action === RECLAIM_SDK_ACTIONS.REQUEST_CLAIM && data?.rdObject) {
-      if (!this.sessionId) return;
-      const rdObject = data.rdObject;
-      chrome.runtime.sendMessage(
-        {
-          action: MESSAGE_ACTIONS.REQUEST_CLAIM,
-          source: MESSAGE_SOURCES.CONTENT_SCRIPT,
-          target: MESSAGE_SOURCES.BACKGROUND,
-          data: {
-            requestHash: rdObject.requestHash,
-            request: {
-              url: rdObject.url,
-              method: rdObject.method,
-              headers: rdObject.headers,
-              body: rdObject.requestBody != null ? String(rdObject.requestBody) : null,
-              extractedParams: rdObject.extractedParams,
-            },
-          },
-        },
-        // eslint-disable-next-line @typescript-eslint/no-empty-function
-        () => {},
-      );
-      logger.info("[Content] Claim requested", "content.claim");
-      return;
     }
   }
 
@@ -1098,7 +879,6 @@ class ReclaimContentScript {
         body: requestValue.body || null,
         headers: requestValue.headers || {},
         responseText: responseBody,
-        extractedParams: requestValue.extractedParams || {},
       };
 
       // Check against each criteria in provider data
@@ -1122,8 +902,7 @@ class ReclaimContentScript {
           // Mark this request as filtered
           // Deliberately no eventType: the background's "Filtering request for
           // request hash" line already carries REQUEST_MATCHED, and it is the
-          // authoritative one (it has the requestHash). Tagging this line too
-          // double-counted the event — a 3-claim session reported 6.
+          // authoritative one (it has the requestHash).
           logger.info(
             "[Content] Matching request found: " +
               formattedRequest.method +
@@ -1134,6 +913,7 @@ class ReclaimContentScript {
 
           this.clearNoMatchTimer();
           this.filteredRequests.push(key);
+          this.matchedResponses.push({ criteria, response: combinedData.response });
 
           // Send to background script for cookie fetching and claim creation
           this.sendFilteredRequestToBackground(formattedRequest, criteria.requestHash, key);
@@ -1166,12 +946,12 @@ class ReclaimContentScript {
    * time it gets that far.
    *
    * Only *near misses* are logged individually. A plain url rejection is the
-   * overwhelming majority — 32 of 33 requests in a typical page load — and says
-   * nothing beyond "this wasn't the request", which the REQUEST_INTERCEPTED
-   * line already covers. Anything past the url check means the provider very
-   * nearly matched, which is the case worth a line: a stale bodySniff template
-   * or a responseMatch that no longer holds is otherwise completely silent, and
-   * the session dies on the timer looking like the user never logged in.
+   * overwhelming majority and says nothing beyond "this wasn't the request",
+   * which the REQUEST_INTERCEPTED line already covers. Anything past the url
+   * check means the provider very nearly matched, which is the case worth a
+   * line: a stale bodySniff template or a responseMatch that no longer holds is
+   * otherwise completely silent, and the session dies on the timer looking like
+   * the user never logged in.
    *
    * Every url rejection is still counted, and surfaces in the timeout summary.
    */
@@ -1197,7 +977,7 @@ class ReclaimContentScript {
         verdict.stage === MATCH_STAGES.RESPONSE_REDACTION) &&
       this.sessionId &&
       criteria?.requestHash &&
-      isEligibilityResponseMismatch(criteria, verdict, response)
+      isEligibilityResponseMismatch(criteria, verdict, response, this.matchedResponses)
     ) {
       chrome.runtime.sendMessage(
         {
@@ -1236,10 +1016,8 @@ class ReclaimContentScript {
    *
    * The background's SessionTimerManager only starts on the *first* intercepted
    * request, so it cannot distinguish "no traffic at all" from "plenty of
-   * traffic, none of it matching" — which is why
-   * RECLAIM_VERIFICATION_NO_ACTIVITY_DETECTED_EXCEPTION had no trigger. This
-   * timer runs in the content script, where the counters live, and reports
-   * whichever of the two actually happened.
+   * traffic, none of it matching". This timer runs in the content script, where
+   * the counters live, and reports whichever of the two actually happened.
    */
   startNoMatchTimer() {
     this.clearNoMatchTimer();
@@ -1287,9 +1065,8 @@ class ReclaimContentScript {
           `${tally.past[stageIndex(MATCH_STAGES.MATCHED)]} fully matched`,
         "content.filter",
         {
-          // NO_ACTIVITY is truthful only when nothing was intercepted at all —
-          // this timer is what finally gives that upstream name a trigger. With
-          // traffic seen the session did have activity, it just never produced
+          // NO_ACTIVITY is truthful only when nothing was intercepted at all.
+          // With traffic seen the session did have activity, it just never produced
           // a claim, which is what the background's session timer already calls
           // CLAIM_CREATION_TIMED_OUT_EXCEPTION. Deliberately not
           // FILTER_REQUEST_ERROR: that marks a *thrown* filtering error, and
@@ -1316,7 +1093,7 @@ class ReclaimContentScript {
         data: { requestHash, request: formattedRequest },
       },
       (response) => {
-        // Background now owns authoritative xPath/jsonPath resolution, so it can
+        // The background owns authoritative xPath/jsonPath resolution, so it can
         // legitimately say "this response doesn't carry the data yet". Release
         // the key so a later response for the same request is filtered again;
         // without this the request stays marked as found and the flow stalls
@@ -1356,17 +1133,17 @@ class ReclaimContentScript {
     window.addEventListener("pagehide", this._pagehideCancel);
   }
 
-  requestBoundInjection() {
+  requestBoundRequestChain() {
     chrome.runtime.sendMessage(
       {
         action: MESSAGE_ACTIONS.INJECT_VIA_SCRIPTING,
         source: MESSAGE_SOURCES.CONTENT_SCRIPT,
         target: MESSAGE_SOURCES.BACKGROUND,
-        data: { op: "RUN_CUSTOM_INJECTION" },
+        data: { op: "RUN_REQUEST_CHAIN" },
       },
       (response) => {
         if (chrome.runtime.lastError || !response?.success) {
-          logger.info("[Content] Custom injection not run", "content.injection");
+          logger.info("[Content] Request chain not run", "content.injection");
         }
       },
     );

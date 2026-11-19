@@ -6,5 +6,5 @@
     "strict": true,
     "skipLibCheck": true
   },
-  "include": ["src/**/*.ts", "../../types/src/zktls-self-host.ts", "../../types/src/zktls-login-url.ts"]
+  "include": ["src/**/*.ts", "../config/src/self-host.ts", "../config/src/login-url.ts"]
 }

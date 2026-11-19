@@ -2,8 +2,8 @@
  * RemoteLogger - logging client for content scripts and offscreen documents
  *
  * Two jobs:
- *  1. Forward every log to the background LoggingHub, which enriches it with
- *     session context and writes to the service worker console.
+ *  1. Forward every log to the background LoggingHub, which levels and redacts
+ *     it and writes to the service worker console.
  *  2. Mirror it to the *local* console of this context, when enabled.
  *
  * (2) matters for debugging: without it, an offscreen document's logs only ever

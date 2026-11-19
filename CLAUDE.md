@@ -4,16 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`@umia/reclaim-browser-extension-sdk` — Umia's vendored fork of upstream
+`@umia/zktls-extension-sdk` — Umia's vendored fork of upstream
 `@reclaimprotocol/browser-extension-sdk` `0.5.2` (patch set and update procedure in
 [PATCHES.md](PATCHES.md)). It lets a website or a browser extension trigger a zero-knowledge-proof
 verification flow. The SDK opens the provider's site in a managed tab, intercepts
 the page's network traffic, builds a claim from a matching request, generates a ZK proof in an offscreen
 document (WASM), and submits/emits the proof.
 
-This is a **library**, not a shippable extension. It publishes prebuilt bundles that a consumer
-extension copies into its own `public/` folder — consumers cannot re-bundle them. Chrome MV3 primary,
-MV2/Firefox variants also emitted.
+This is a **library**, not a shippable extension. Its consumer is `web/extension`, whose
+`scripts/setup.js` copies the prebuilt content, interceptor and offscreen bundles into its
+`public/reclaim-browser-extension-sdk/` (they cannot be re-bundled) and whose service worker imports
+the ESM SDK bundle. The Hub imports the same package for its page-side request API. Chrome MV3
+primary, MV2/Firefox variants also emitted.
 
 **Bound sessions only.** The fork serves only Hub-bound self-host sessions: `startVerification` refuses a
 request without the nested `umia` block, and no page-callback or unbound submission path remains. A store
@@ -24,6 +26,7 @@ release of an extension built on it uses deferred publishing and goes live at cu
 ```bash
 bun run build     # webpack over all 3 configs → build/ (prebuild prettier removed; see PATCHES.md)
 bun run test      # node:test over src/**/*.test.js, then bun test ./tests
+bun run test:build # after build: runs the built bundles' executeScript functions in a bare context
 ```
 
 - [example-provider.test.js](src/utils/claim-creator/example-provider.test.js) is the closest thing to
@@ -42,9 +45,10 @@ bun run test      # node:test over src/**/*.test.js, then bun test ./tests
   it runs _every_ file in it, including non-tests like `src/utils/polyfill-test.js`.
 - **Circuit assets use the pinned Umia mirror.** `web/extension/scripts/setup.js` verifies
   the copied assets; the old unverified `install-assets.js` downloader was removed.
-- [webpack-build-utils/build.js](webpack-build-utils/build.js) sets `config.mode` and appends
-  `ZipPlugin` on the **array** exported by `webpack.config.js`, so neither actually reaches the three
-  configs. Effective mode comes from `process.env.NODE_ENV`, which `build.js` sets to `production`.
+- [webpack-build-utils/build.js](webpack-build-utils/build.js) sets production mode before loading
+  the configs. `--sdk-only` builds just the public ESM entry for Hub; the default still builds
+  all three extension targets. Both modes clean `build/`, so run the full build before packaging
+  the extension. Progress is interactive-only; CI prints timings, warnings and errors.
 
 ### Verifying a change end to end
 
@@ -61,9 +65,9 @@ published SDK, which a bound-session fork cannot run.
 | --------------------- | ------------------------------------------------------------ | ------------------------------------------------- |
 | Consumer page / popup | [src/ReclaimExtensionSDK.js](src/ReclaimExtensionSDK.js)     | Public API surface                                |
 | Service worker        | [src/background/background.js](src/background/background.js) | `initBackground()` returns `ctx`                  |
-| Content script        | [src/content/content.js](src/content/content.js)             | Runs in every tab, activates only in managed tabs |
-| Page (MAIN world)     | [src/interceptor/](src/interceptor/)                         | `fetch`/`XHR` patching + `window.Reclaim` API     |
-| Offscreen document    | [src/offscreen/offscreen.js](src/offscreen/offscreen.js)     | attestor-core WASM + WebSocket                    |
+| Content script        | [src/content/content.js](src/content/content.js)             | Registered on granted sites; Hub relay or managed tab |
+| Page (MAIN world)     | [src/interceptor/](src/interceptor/)                         | `fetch`/`XHR` patching                            |
+| Offscreen document    | [src/offscreen/offscreen.js](src/offscreen/offscreen.js)     | attestor-core WASM + WebSocket, proof workers     |
 
 The SDK detects its own mode in the constructor: `chrome-extension:` protocol → `"extension"` (talks to
 background via `chrome.runtime.sendMessage`), otherwise `"web"` (talks to the content script via
@@ -72,11 +76,12 @@ background via `chrome.runtime.sendMessage`), otherwise `"web"` (talks to the co
 ### The verification pipeline
 
 ```
-SDK.init()          → POST /api/sdk/init/session/  (ethers Wallet signs {providerId,timestamp}) → sessionId
+Hub page            → POST /api/v1/hub/zktls/proof-request (API signs + binds) → config with `umia` block
+fromJsonString()    → request (upstream SDK.init() signing with an app secret is never used client-side)
 startVerification() → START_VERIFICATION → sessionManager.startVerification
                         ├─ fetchProviderData(providerId) from the bound session's backend
                         └─ chrome.tabs.create(loginUrl) → tab added to ctx.managedTabs
-content script (managed tab) → injects network-interceptor + injection-scripts into MAIN world
+content script (managed tab) → injects network-interceptor into MAIN world
 interceptor → INTERCEPTED_REQUEST_AND_RESPONSE → content.filterInterceptedRequests()
                         (polls every NETWORK_FILTERING_INTERVAL_MS against providerData.requestData)
 match → FILTERED_REQUEST_FOUND {requestHash, request} → claimRequest.resolveClaimRequest
@@ -115,7 +120,9 @@ Non-obvious properties of this pipeline:
 - **Timers.** `SessionTimerManager` starts only on the _first_ intercepted request
   (`ctx.firstRequestReceived`) and fails the session if no proof lands within
   `SESSION_TIMER_DURATION_MS`. It is _paused_ across proof generation, so the 30 s window never kills a
-  proof. All tunables live in [src/utils/constants/config.js](src/utils/constants/config.js) — put new
+  proof. That includes a claim queued behind another: the timer each proof restarts is cleared before
+  the next queued claim generates, as a connected recipe's replay captures its requests together. All
+  tunables live in [src/utils/constants/config.js](src/utils/constants/config.js) — put new
   timeouts there, not inline. Separately, `startVerification` arms an expiry timer at the bound
   session's deadline that fails the session with `SESSION_EXPIRED`, closes its offscreen client and
   returns from the provider tab. Only terminal paths and replacement call `clearExpiryTimer()`;
@@ -135,8 +142,6 @@ Non-obvious properties of this pipeline:
   `proofQueue` also reads `error?.message || error?.error` now, so the next plain-object rejection stays
   legible.
 
-- **`expectManyClaims`** lets a provider script defer submission until it flips the flag off; that
-  transition triggers `submitProofs` immediately if proofs are already queued.
 - **The content script — and its popup — is destroyed and rebuilt on every navigation.** It is injected
   at `document_start` on each page, and a multi-request provider routinely walks several origins: the
   stock `example` provider goes example.org → example.com → jsonplaceholder, re-running
@@ -155,8 +160,7 @@ Non-obvious properties of this pipeline:
   `{completed: ctx.generatedProofs.size, total: max(requestData.length, completed)}` — bound as
   `ctx.claimProgress()` for `proofQueue`, per the shared-context pattern — and rides along in both
   messages' `data.progress`. The popup renders what it is given and falls back to its old increment only
-  when the field is absent. `total` takes the _larger_ of the two because `expectManyClaims` can produce
-  more claims than `requestData` declares, and a counter reading `4/3` is worse than one that grows.
+  when the field is absent. `total` takes the _larger_ of the two, so a counter never reads `4/3`.
 
   Its own module rather than a function in `background.js` so `node --test` can reach it: `background.js`
   uses extensionless imports, which webpack resolves and Node's ESM loader does not.
@@ -167,6 +171,17 @@ Non-obvious properties of this pipeline:
   `CLAIM_CREATION_FAILED` — `messageRouter` un-memoizes `ctx.filteredRequests`, and the content script
   pops the key back off `this.filteredRequests` so polling resumes. Skipping any one of those three
   stalls the flow until the session timer fires.
+- **A conclusive criteria miss fails the session immediately.** `content.js` reports a complete,
+  signed-in response that fails the recipe's rule ([criteria-result.js](src/content/criteria-result.js):
+  a GitHub count below threshold, or a FOMO own profile that misses its hold-time or clan rule) as
+  `RESPONSE_MATCH_RESULT`, and
+  `sessionManager.recordResponseMatchResult` calls `failSession("CRITERIA_NOT_MET")` on the spot. It
+  does not wait for the session timer: that used to add up to 30 s to an answer the extension already
+  had. A FOMO profile counts only when its account equals the one the matched
+  `/v2/users/current` response proved, so browsing another user's profile never fails the session.
+  The one deferral is a claim already in flight for that entry (`ctx.filteredRequests`) — it keeps
+  its chance, and the recorded miss turns a later timer expiry into `CRITERIA_NOT_MET` through
+  `missingRequestCode`.
 
 ### The claim object must satisfy the attestor's schema exactly
 
@@ -180,9 +195,8 @@ Provider documents legitimately carry fields that must **not** be forwarded (`or
 `isOptional`, the legacy `responseSelections`), and that set grows independently of this SDK. So:
 
 - [claim-shape.js](src/utils/claim-creator/claim-shape.js) `assertClaimShape()` is the last gate before the
-  attestor: an **allowlist** of the schema's keys, plus string coercion of `paramValues` (a
-  `customInjection` can hand back a number via `window.Reclaim`, which AJV rejects) and a required-field
-  check. It strips rather than throws — a dropped unknown field still yields an acceptable claim, whereas
+  attestor: an **allowlist** of the schema's keys, plus string coercion of `paramValues` (AJV
+  rejects a non-string) and a required-field check. It strips rather than throws — a dropped unknown field still yields an acceptable claim, whereas
   failing the session denies a verification over a field the attestor would have ignored.
 - `responseRedactions` is likewise built as an allowlist (`xPath`, `jsonPath`, `regex`, `hash`). Empty
   `xPath`/`jsonPath` are omitted, not sent as `""`.
@@ -374,10 +388,10 @@ Three separate action vocabularies, all in [src/utils/constants/interfaces.js](s
   [messageRouter.js](src/background/messageRouter.js) validates `source`/`target` plus
   `ctx.managedTabs.has(sender.tab.id)` before acting. Adding a handler means adding a case _and_
   the matching guard; unmanaged tabs must be rejected.
-- **A page never chooses what a claim requests.** `FILTERED_REQUEST_FOUND` and `REQUEST_CLAIM`
-  carry only `{requestHash, request}`. [claimRequest.js](src/background/claimRequest.js) takes the
-  criteria from the pinned recipe entry with that hash (`REQUEST_CLAIM` also searches
-  `allowedInjectedRequestData`). Recipes need not store a `requestHash`, so `withRequestKeys`
+- **A page never chooses what a claim requests.** `FILTERED_REQUEST_FOUND` carries only
+  `{requestHash, request}`. [claimRequest.js](src/background/claimRequest.js) takes the
+  criteria from the pinned recipe entry with that hash, and the page cannot supply parameter
+  values. Recipes need not store a `requestHash`, so `withRequestKeys`
   keys each entry when the provider is fetched: its stored hash if unique, else its position. The
   request must still match that entry, and its host must be in the signed `hostWhitelist`, before
   any cookie is read. Page-reported `Cookie`/`Origin`/`Referer` headers and any
@@ -389,39 +403,52 @@ Three separate action vocabularies, all in [src/utils/constants/interfaces.js](s
   `LOG_MESSAGE` is accepted from extension pages and from the content script of the provider
   or caller tab.
 
-### Provider-facing page API
+### No provider code runs in the page
 
-[injection-scripts.js](src/interceptor/injection-scripts.js) installs `window.Reclaim` in the MAIN world
-for provider-authored `customInjection` scripts: `parameters` (getter), `getParametersSync()`,
-`updatePublicData()`, `canExpectManyClaims()`, `reportProviderError()`, `requestClaim()`. Each posts a
-`RECLAIM_*` message that the content script forwards to background. Changing these signatures breaks
-published provider scripts.
+The extension runs no provider-authored code and exposes no page API. A recipe or registry response
+carrying `customInjection` or `customInjectionSha256` is refused before any tab opens
+(`fetchProviderData`), and the registry refuses to save or serve one.
 
-The code itself never passes through content or the page. Content sends only
-`INJECT_VIA_SCRIPTING {op: "RUN_CUSTOM_INJECTION"}`;
-[injectionManager.js](src/background/injectionManager.js) takes the code from the session-bound provider
-response, checks its `customInjectionSha256`, the pinned provider ID/version, the managed tab's top frame,
-document and login-URL origin, then runs it once per document in the MAIN world. That needs a
-content↔background round trip per document, so a provider script that patches `fetch`/XHR can miss the
-page's first requests.
+What a page needs beyond its own traffic is declarative. A recipe's `requestChain` names a ready URL
+and the response fields that fill the next request's template variables. Content sends
+`INJECT_VIA_SCRIPTING {op: "RUN_REQUEST_CHAIN"}`; `runBoundRequestChain` in
+[injectionManager.js](src/background/injectionManager.js) checks the managed tab's top frame, document,
+login-URL origin and that every chain URL's host is signed, then runs one fixed fetch function once per
+document in the MAIN world. The page-world interceptor captures those fetches like any page request.
 
 A provider request that is the page's own document loads before the interceptor exists. Content therefore
 also sends `{op: "REPLAY_BOUND_DOCUMENT"}`, once provider data arrives and on each URL change.
 `runBoundReplay` in the same module re-requests the tab's URL, read from `chrome.tabs.get` and never from
 the message, as one credentialed same-origin XHR in that document. It does so only if the recipe declares
 that exact URL as a plain GET, and its host is in the signed attestor whitelist. The query must match
-exactly. A template variable stays within one path segment or one query value. Each document and URL is
-replayed at most once, with at most 3 replays per session. Only `disableRequestReplay: true` turns it
-off.
+exactly. A template variable stays within one path segment or one query value. The same round also
+requests every other plain GET of the pinned recipe whose URL is fixed (no `{{…}}` variable, not `REGEX`)
+and on the document's origin, so a connected recipe proves all its requests from one signed-in page with
+no navigation. Each document and URL is replayed at most once, with at most 3 replays per session for
+each plain GET the recipe declares. Only `disableRequestReplay: true` turns it off.
+
+**A function passed to `chrome.scripting.executeScript` runs in the page without the bundle's Babel
+helpers.** The build targets ES5, so spread, `for...of` and destructuring there compile to helper calls
+that throw in the page, and the function's own `catch` hides it. Source tests run it natively and pass;
+[build-checks/](build-checks/) (`bun run test:build`, in CI after the build) runs the built ones.
 
 ### Provider host access
 
 A consumer that grants provider sites as optional host permissions imports
-`@umia/reclaim-browser-extension-sdk/provider-access` ([providerAccess.js](src/background/providerAccess.js),
+`@umia/zktls-extension-sdk/provider-access` ([providerAccess.js](src/background/providerAccess.js),
 dependency-free source): `providerContentScript()` builds the dynamic registration (every frame, at
 `document_start`) and `providerRequestUrls()` lists the provider's request URLs, which need a grant
 alongside the login site. The router pins the verification popup to frame 0, and the popup sets its own
 top-of-stack `z-index`.
+
+The popup is the Umia widget from [src/ui/](src/ui/), rendered in a closed shadow root so provider-page
+CSS can't reach it. `reduceWidget` folds each popup handler call into a view, and `webpack.config.js`
+concatenates `tokens.css`, `base.css` and `widget.css` into the popup stylesheet the content script
+fetches. Fonts ship in `build/fonts/` and are registered on the document (Chrome ignores `@font-face` in
+a shadow root). `theme.js` follows the Hub's light/dark/system choice, which the extension mirrors
+into `chrome.storage.local` as `umiaTheme`; `tokens.css` holds the light values from Figma and the
+dark values from the Hub's `.dark` theme. `web/extension` imports the same kit for its grant page
+through the `./ui/*` export.
 
 ### Offscreen document
 
@@ -434,7 +461,7 @@ directly from an MV3 service worker.
 A bound session's attestor client lives in
 [session-attestor.js](src/offscreen/session-attestor.js): one fresh client and socket per
 session/auth identity, closed on replacement, cancellation, completion, `pagehide` and at
-`boundSessionDeadline()` (the earliest of the signed auth, session and authority expiries). A deadline
+`boundSessionDeadline()` (the earlier of the signed auth and session expiries). A deadline
 close reports `SESSION_EXPIRED`, any other close `CANCELLED`, so the code does not depend on which of
 this and the background's expiry timer fires first; both use [at-deadline.js](src/utils/at-deadline.js).
 Offscreen drops results that arrive after a close; the background's
@@ -442,11 +469,21 @@ Offscreen drops results that arrive after a close; the background's
 `transportRequestId`, session ID and extension sender. A proof timeout or a socket that never opened
 reports `ATTESTOR_UNREACHABLE`. A rejection carrying one of the patched attestor's finite reasons
 (`data.reason`, thrown or inside the claim response's `error`) reports the code
-`ZKTLS_ATTESTOR_REJECTION_CODES` in `@umia/types/zktls-self-host` maps it to, by exact table membership.
+`ZKTLS_ATTESTOR_REJECTION_CODES` in `@umia/zktls-config/self-host` maps it to, by exact table membership.
 Without a known reason, the attestor's `ERROR_AUTHENTICATION_FAILED` code reports `ATTESTOR_AUTH_FAILED`
 and any other attestor failure reports `PROOF_GENERATION_FAILED`.
 Cancellation also comes from the initiating document's content script, which sends
 `CANCEL_VERIFICATION` on `pagehide`: proofs can only be delivered to that document.
+
+ZK chunk proofs run in workers. `getOperators` gives each claim its own pool from
+[pooled-zk-operators.js](src/utils/zk/pooled-zk-operators.js) — `stwo-worker.js` (module worker)
+or `snarkjs-worker.js` (classic worker, since ffjavascript's blob workers break the extension
+CSP) — sized by `ZK_WORKER_POOL_SIZE` (build-time, 0–4, default `min(hardwareConcurrency, 4)`; 0
+proves in-thread). The pool closes when its claim ends, so switching engines never keeps two
+resident. A crashed worker retries its chunk once; a timeout fails the claim. Stwo proofs of 64 KiB
+or more are deflated behind a `UMIA_STWO_ZLIB_V1` header when smaller
+([stwo-proof-compression.js](src/utils/zk/stwo-proof-compression.js)); the patched attestor
+inflates them. `STWO_PROOF_COMPRESSION=0` at build time turns that off.
 
 ## Build output and bundle-format constraints
 
@@ -577,20 +614,17 @@ request" above.
 Every request to the session's backend carries `reclaim-api-client: <client source>`, matching what the
 InApp SDK and Verifier app send — `fetchProviderData`, `updateSessionStatus`, `postTelemetry`,
 `submitBoundProofs` ([fetch-calls.js](src/utils/fetch-calls.js)) and `_initSession`
-([ReclaimExtensionSDK.js](src/ReclaimExtensionSDK.js)).
+([ReclaimExtensionSDK.js](src/ReclaimExtensionSDK.js)). The backend is the Umia API's compat routes
+(`services/api/src/routes/zktls-compat.ts`), whose CORS policy allows that header.
 
-Per the team's guideline the extension contributes **no device information to analytics**: request bodies
-are unchanged, so `deviceId`/`deviceType` stay absent and the backend records them as `NA`. The extension
-emits no `appLogs` of its own — the `USER_STARTED_VERIFICATION` analytics row is created server-side by
-reclaim-sdk-backend in response to `updateSessionStatus`, and there is no extension equivalent of InApp's
-`FETCHED_PROVIDERS`.
+The extension contributes **no device information**: request bodies carry no `deviceId`/`deviceType`,
+and it emits no `appLogs`. The API records `USER_STARTED_VERIFICATION` as a session event from
+`updateSessionStatus`; there is no extension equivalent of InApp's `FETCHED_PROVIDERS`.
 
-## Docs that drift
+## Docs
 
-[readme.md](readme.md) is the accurate consumer-facing integration guide (assets, manifest, permissions,
-troubleshooting). The per-module READMEs
+[readme.md](readme.md) is the consumer-facing integration guide (assets, manifest, permissions,
+troubleshooting) for how Umia uses the fork. The per-module READMEs
 ([background](src/background/README.md), [content](src/content/README.md),
-[offscreen](src/offscreen/README.md), [logger](src/utils/logger/README.md)) predate several refactors —
-they still reference `debugLogger`/`DebugLogType`, `loggerService`, and `ProviderVerificationPopup.js`,
-none of which exist. Read them for intent, verify against source, and prefer updating them over
-propagating their examples.
+[offscreen](src/offscreen/README.md), [logger](src/utils/logger/README.md)) are short module maps,
+rewritten for the fork. Update them with the code they describe.

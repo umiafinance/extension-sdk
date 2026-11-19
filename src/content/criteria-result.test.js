@@ -68,4 +68,61 @@ describe("eligibility mismatch evidence", () => {
       "unreviewed recipe shape",
     );
   });
+
+  describe("FOMO profile recipes", () => {
+    const USER = "d16c8d0d-0000-4000-8000-000000000001";
+    const OTHER = "0afc9a35-0000-4000-8000-000000000002";
+    const directory = new URL("../../../providers/recipes/", import.meta.url);
+    const recipes = ["fomo-hold-time", "fomo-clans", "fomo-clan-lists"].flatMap((folder) =>
+      readdirSync(new URL(`${folder}/`, directory))
+        .filter((name) => name.endsWith(".json"))
+        .map((name) => `${folder}/${name}`),
+    );
+    const load = (file) =>
+      JSON.parse(readFileSync(new URL(file, directory), "utf8")).providerConfigs[0].requestData;
+    const body = (id, fields) =>
+      JSON.stringify({
+        success: true,
+        responseObject: { id, address: "0xabc", ...fields, followsCurrentUser: false },
+      });
+    const check = (
+      requests,
+      responseBody,
+      { status = 200, signedIn = USER, signedInStatus = 200 } = {},
+    ) => {
+      const [account, profile] = requests;
+      const matched = signedIn
+        ? [{ criteria: account, response: { status: signedInStatus, body: body(signedIn, {}) } }]
+        : [];
+      const verdict = describeRequestMatch(
+        { url: `https://prod-api.fomo.family/v2/users/${USER}`, method: "GET", responseText: responseBody },
+        profile,
+      );
+      return isEligibilityResponseMismatch(profile, verdict, { status, body: responseBody }, matched);
+    };
+    const holdTime = load("fomo-hold-time/more-than-5-days.json");
+
+    it("fails a loaded own profile that does not meet the rule", () => {
+      assert.ok(recipes.length >= 6);
+      for (const file of recipes) {
+        const requests = load(file);
+        const missed = file.endsWith("no-clan.json")
+          ? { clan: { id: OTHER, name: "x" } }
+          : { averageHoldTimeSeconds: null, clan: null };
+        assert.equal(check(requests, body(USER, missed)), true, file);
+      }
+      assert.equal(check(holdTime, body(USER, { averageHoldTimeSeconds: 3600, clan: null })), true);
+      assert.equal(check(holdTime, body(USER, { clan: null })), true, "no hold time");
+      assert.equal(check(holdTime, body(USER, { averageHoldTimeSeconds: 432001, clan: null })), false);
+    });
+
+    it("waits for the signed-in account and ignores other users and failed responses", () => {
+      const missed = body(USER, { averageHoldTimeSeconds: 0 });
+      assert.equal(check(holdTime, missed, { signedIn: null }), false, "account not proven yet");
+      assert.equal(check(holdTime, missed, { signedIn: OTHER }), false, "another user's profile");
+      assert.equal(check(holdTime, missed, { signedInStatus: 431 }), false, "account request failed");
+      assert.equal(check(holdTime, missed, { status: 431 }), false, "HTTP failure");
+      assert.equal(check(holdTime, "not json"), false, "unparseable");
+    });
+  });
 });

@@ -99,10 +99,7 @@ export function normalizeRedactionHash(hash, logger) {
  *   TEMPLATE | REGEX → build a regex from the template and test it
  *
  * `CONSTANT` is the canonical value for a plain URL AND upstream's default: InApp
- * infers TEMPLATE when the url contains `{{` and CONSTANT otherwise. This SDK
- * used to return `false` for it, so a provider authored with the normal default
- * never matched any request at all — no claim, no proof, no diagnostic beyond
- * "request intercepted", and the session died on the timer.
+ * infers TEMPLATE when the url contains `{{` and CONSTANT otherwise.
  */
 export const URL_TYPES = {
   CONSTANT: "CONSTANT",
@@ -146,9 +143,9 @@ export function normalizeUrlType(urlType, url, logger) {
 const STORED_REQUEST_HASH = /^0x[0-9a-f]{64}$/i;
 
 /**
- * Give every recipe entry the unique `requestHash` that content and background name it by.
- * Served recipes need not carry one (several bench recipes do not), so an entry
- * without a stored hash, or repeating one, is keyed by its place in the pinned recipe.
+ * Give every recipe entry the unique `requestHash` that content and background
+ * name it by. Served recipes need not carry one, so an entry without a stored
+ * hash, or repeating one, is keyed by its place in the pinned recipe.
  *
  * @param {Object} provider - provider data as fetched
  * @returns {Object} the provider with keyed `requestData` / `allowedInjectedRequestData`

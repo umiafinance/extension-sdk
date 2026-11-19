@@ -13,6 +13,7 @@ import { createRemoteLogger } from "../utils/logger/RemoteLogger";
 createRemoteLogger("content").info("[Content] Ready", "content.init");
 ```
 
-`logLevel` (default `INFO`) prints payloads redacted; `FINE` prints them raw.
-`consoleEnabled` (default off) decides whether anything is printed. See the
-Logging section of the package `CLAUDE.md` for the redaction rules.
+`logLevel` (default `INFO`) prints payloads redacted; `FINE` prints them raw except
+credentials (cookies, keys, tokens, signatures), which are blanked at every level.
+`consoleEnabled` (default off) decides whether anything is printed. Both live in
+`chrome.storage.local` and only an extension page can change them.

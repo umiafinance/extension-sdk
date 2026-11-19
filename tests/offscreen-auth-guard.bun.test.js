@@ -3,11 +3,11 @@ import { jest, mock, test } from "bun:test";
 import {
   ZKTLS_ATTESTOR_REJECTION_REASONS,
   zktlsEndpointProfile,
-} from "@umia/types/zktls-self-host";
+} from "@umia/zktls-config/self-host";
 import { MESSAGE_ACTIONS, MESSAGE_SOURCES } from "../src/utils/constants/interfaces.js";
 import { PROOF_GENERATION_TIMEOUT_MS, ZK_WORKER_POOL_SIZE } from "../src/utils/constants/config.js";
 
-const devnet = zktlsEndpointProfile("cloud-devnet");
+const devnet = zktlsEndpointProfile("native-devnet");
 let listener;
 let complete;
 let pendingClaim;
@@ -83,7 +83,6 @@ function boundMessage(client) {
     session: {
       sessionId: "synthetic-session",
       umia: {
-        providerVersion: "v1",
         sessionToken: "d".repeat(64),
         attestorAuth: {
           data: {
@@ -99,10 +98,7 @@ function boundMessage(client) {
       route: {
         backendUrl: devnet.backendUrl,
         attestorUrl,
-        authority: {
-          digest: `sha256:${"c".repeat(64)}`,
-          validUntil: new Date((now + 600) * 1000).toISOString(),
-        },
+        network: { authorityDigest: `sha256:${"c".repeat(64)}` },
       },
     },
     name: "http",
@@ -238,8 +234,9 @@ test("a pending claim that reaches the session deadline reports SESSION_EXPIRED,
   resolvePending = null;
   const before = sent.length;
   const message = boundMessage({ url: devnet.attestorUrl });
-  // Signed auth carries whole seconds, so this deadline lands within two seconds.
-  message.session.umia.attestorAuth.data.expiresAt = Math.floor(Date.now() / 1000) + 1;
+  // Signed auth carries whole seconds; +2 keeps the deadline 1-2s out, so a busy runner can't pass it
+  // before the claim starts.
+  message.session.umia.attestorAuth.data.expiresAt = Math.floor(Date.now() / 1000) + 2;
   const result = request(message, "expiring");
   for (let i = 0; i < 20 && !resolvePending; i += 1) await Promise.resolve();
   assert.equal(typeof resolvePending, "function");
@@ -323,7 +320,7 @@ test("attestor failures report finite codes to the page and the session status",
 
 test("an attestor rejection reason picks the page and status code, thrown or embedded", async () => {
   const { AttestorError, proto } = actualAttestor;
-  // The #2833 table's extension column, kept independent of the shared map.
+  // The rejection table's extension column, kept independent of the shared map.
   const expected = {
     CLAIM_CONTEXT_INVALID: "CONFIG_REJECTED",
     CLAIM_CONTEXT_MESSAGE_UNSUPPORTED: "CONFIG_REJECTED",
@@ -347,6 +344,7 @@ test("an attestor rejection reason picks the page and status code, thrown or emb
     TEE_CLAIMS_DISABLED: "CONFIG_REJECTED",
     CERTIFICATE_FETCH_DISABLED: "CONFIG_REJECTED",
     TOPRF_DISABLED: "CONFIG_REJECTED",
+    CERTIFICATE_DISTRUSTED: "CONFIG_REJECTED",
     TUNNEL_ID_IN_USE: "PROOF_GENERATION_FAILED",
     TUNNEL_NOT_FOUND: "PROOF_GENERATION_FAILED",
     TUNNEL_REQUEST_MISMATCH: "PROOF_GENERATION_FAILED",
@@ -428,7 +426,47 @@ test("an attestor rejection reason picks the page and status code, thrown or emb
         boundMessage({ url: devnet.attestorUrl }),
         "embedded-fallback",
       );
-      assert.equal(embedded.error, "PROOF_GENERATION_FAILED");
+      assert.equal(embedded.error, "ATTESTOR_AUTH_FAILED");
+    } finally {
+      claimResult = { claim: { identifier: "synthetic" } };
+    }
+  }
+});
+
+test("embedded rejection diagnostics expose only known wire codes and reasons", async () => {
+  const privateDetail = "synthetic-private-claim-response";
+  for (const [error, expectedCode, expectedReason, failure] of [
+    [
+      { code: actualAttestor.proto.ErrorCode.ERROR_INVALID_CLAIM, message: privateDetail,
+        data: JSON.stringify({ reason: "TRANSCRIPT_DECRYPT_FAILED", detail: privateDetail }) },
+      "ERROR_INVALID_CLAIM", "TRANSCRIPT_DECRYPT_FAILED", "PROOF_GENERATION_FAILED",
+    ],
+    // An error without message text must never be accepted as a successful proof.
+    [{ code: actualAttestor.proto.ErrorCode.ERROR_AUTHENTICATION_FAILED },
+      "ERROR_AUTHENTICATION_FAILED", "unknown", "ATTESTOR_AUTH_FAILED"],
+    [{ code: "ERROR_BAD_REQUEST", message: privateDetail, data: { reason: privateDetail } },
+      "ERROR_BAD_REQUEST", "unknown", "PROOF_GENERATION_FAILED"],
+    [{ code: privateDetail, message: privateDetail, data: privateDetail },
+      "unknown", "unknown", "PROOF_GENERATION_FAILED"],
+    [{ code: 123456, message: privateDetail }, "unknown", "unknown", "PROOF_GENERATION_FAILED"],
+    [privateDetail, "unknown", "unknown", "PROOF_GENERATION_FAILED"],
+  ]) {
+    const beforeSent = sent.length;
+    const beforeFetches = fetches.length;
+    claimResult = { error };
+    try {
+      const result = await request(boundMessage({ url: devnet.attestorUrl }), "safe-diagnostic");
+      assert.equal(result.success, false);
+      assert.equal(result.error, failure);
+      const emitted = sent.slice(beforeSent);
+      const diagnostic = emitted.find((message) =>
+        message.action === MESSAGE_ACTIONS.LOG_MESSAGE &&
+        message.data.message.startsWith("[OFFSCREEN] Proof contains embedded error"));
+      assert.equal(diagnostic?.data.message,
+        `[OFFSCREEN] Proof contains embedded error code=${expectedCode} rejectionReason=${expectedReason}`);
+      assert.equal(JSON.stringify(emitted).includes(privateDetail), false);
+      assert.equal(fetches.slice(beforeFetches).some(({ options }) =>
+        JSON.parse(options.body).status === "PROOF_GENERATION_SUCCESS"), false);
     } finally {
       claimResult = { claim: { identifier: "synthetic" } };
     }

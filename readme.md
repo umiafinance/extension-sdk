@@ -4,85 +4,92 @@ Trigger Reclaim zero-knowledge proof verification from your browser extension or
 
 > Chrome **Manifest V3**. MV2/Firefox bundles are also included.
 
-> **Umia fork.** This package is Umia's patched copy (see `PATCHES.md`), built into the Umia
-> extension in `web/extension`. A verification always starts from a session the Umia API has
-> already signed and bound to the user: no app secret ever reaches a browser, an extension or a page.
+> **Umia fork.** This package is Umia's patched copy of the Reclaim Protocol browser extension
+> SDK (upstream: <https://github.com/reclaimprotocol/reclaim-browser-extension-sdk>, MIT; see
+> `PATCHES.md`). It is the workspace package `@umia/zktls-extension-sdk`, built into the
+> Umia extension in `web/extension` and imported by the Umia app. A verification always starts from a
+> session the Umia API has already signed and bound to the user: no app secret ever reaches a
+> browser, an extension or a page. The steps below describe how Umia uses it, not the upstream
+> npm package.
 
 ## Install
 
-```bash
-npm i @reclaimprotocol/browser-extension-sdk
+It is not published to npm. Depend on it as a workspace package:
+
+```json
+{ "dependencies": { "@umia/zktls-extension-sdk": "workspace:*" } }
 ```
 
 ## 1. Copy the SDK assets
 
 Umia's extension build copies the SDK bundles and verifies the ZK circuit assets against
-the pinned manifest. Follow the staging and build commands in
-[`web/extension/README.md`](../../../web/extension/README.md#build), including the reviewed
-activation and network config inputs. The former `install-assets.js` downloader was removed
-because it did not verify circuit digests.
+the pinned manifest (`infra/aws/src/asset-mirror/manifest.json`). The extension build does both;
+see [`web/extension/README.md`](../../../web/extension/README.md#build).
+Upstream's `install-assets.js` downloader is removed because it did not verify circuit digests.
 
-The mirrored Stwo WASM is checked against the installed ZK package before staging, so an
-older prover cannot be packaged after an upgrade. Rebuild and reload the extension after
-staging. The updated Stwo proof format requires an updated attestor verifier; proofs
-created with the previous format must be regenerated.
+Staging checks the mirrored Stwo WASM against the installed ZK package, so an outdated prover
+cannot be packaged. Rebuild and reload the extension after staging. The attestor's verifier must
+support this Stwo proof format; proofs made in an older format must be regenerated.
 
-The default proof engine is `stwo`. The deployed devnet attestor now supports the
-updated Stwo proof format. The published GitHub recipes leave the engine unset and
-therefore use this default. Select `snarkjs` only for an explicitly scoped sandbox;
-its current AES circuits have not been approved for eligibility gates.
+The default proof engine is `stwo`, which the shared attestor (`ZKTLS_SHARED_ATTESTOR`) supports.
+Published recipes leave the engine unset and use this default. Select `snarkjs` only for an
+explicitly scoped sandbox.
 
-Transcript chunk proofs run in up to four extension workers per claim. Workers
-stop when the claim finishes or is cancelled, so switching engines does not
-retain a second pool. A crashed worker can retry once in a new worker; a worker
-proof timeout fails the claim without rerunning that proof on the offscreen thread.
-Set `ZK_WORKER_POOL_SIZE=0` at build time to use the stock in-thread prover.
-The pool reduces local proving time; Stwo claims can still spend much longer
-uploading their multi-megabyte proof payloads to the attestor. Stwo proof blobs
-are compressed individually when the browser supports `CompressionStream` and
-the result is smaller. The attestor must support this proof format. WebSocket
-message compression stays disabled.
+Transcript chunk proofs run in up to four extension workers per claim; set
+`ZK_WORKER_POOL_SIZE=0` at build time to use the stock in-thread prover. Workers stop when the
+claim finishes or is cancelled, so switching engines never leaves a second pool running. A crashed
+worker retries once in a new worker; a worker proof timeout fails the claim instead of rerunning
+the proof on the offscreen thread. Uploading a multi-megabyte Stwo proof to the attestor can take
+longer than proving it. Each Stwo proof blob is compressed when the browser supports
+`CompressionStream` and the result is smaller, which the attestor must accept. WebSocket message
+compression stays disabled.
 
 ## 2. Update your manifest
+
+The Umia manifest is `web/extension/public/manifest.json`. It requests no install-time host
+access: hosts are optional and granted at runtime, and the content script is registered
+dynamically for granted sites only (`providerContentScript()` from
+`@umia/zktls-extension-sdk/provider-access`), not declared statically.
 
 ```json
 {
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self';"
   },
-  "host_permissions": ["<all_urls>"],
   "permissions": ["offscreen", "cookies", "scripting", "storage"],
-  "content_scripts": [
-    {
-      "js": ["reclaim-browser-extension-sdk/content/content.bundle.js"],
-      "run_at": "document_start",
-      "matches": ["<all_urls>"]
-    }
-  ],
+  "optional_host_permissions": ["http://localhost/*", "https://*/*"],
   "web_accessible_resources": [
     {
       "resources": [
         "reclaim-browser-extension-sdk/interceptor/network-interceptor.bundle.js",
-        "reclaim-browser-extension-sdk/interceptor/injection-scripts.bundle.js",
         "reclaim-browser-extension-sdk/content/components/reclaim-provider-verification-popup.css",
-        "reclaim-browser-extension-sdk/content/components/reclaim-provider-verification-popup.html"
+        "reclaim-browser-extension-sdk/fonts/Geist-Variable.woff2",
+        "reclaim-browser-extension-sdk/fonts/GeistMono-Variable.woff2",
+        "reclaim-browser-extension-sdk/fonts/Sora-Variable.woff2"
       ],
-      "matches": ["<all_urls>"]
+      "matches": ["http://localhost/*", "https://*/*"]
     }
   ]
 }
 ```
 
-All of it is required. `wasm-unsafe-eval` runs the ZK prover, `offscreen` hosts it, `cookies` reads the provider's auth session, and `scripting` runs reviewed provider scripts in the provider tab. Only the page-injected bundles and the popup template are web-accessible: the offscreen document and its circuits load inside the extension, and a page that could frame them would receive every proof request.
+All of it is required. `wasm-unsafe-eval` runs the ZK prover, `offscreen` hosts it, `cookies`
+reads the provider's auth session, and `scripting` registers the content script and runs reviewed
+provider scripts in the provider tab. Only the page-injected bundles, the widget stylesheet and its
+fonts are web-accessible: the offscreen document, its workers and circuits load inside the
+extension, and a page that could frame them would receive every proof request.
 
 ## 3. Initialize the background
 
 ```js
 // service worker (background.js)
-import { reclaimExtensionSDK } from "@reclaimprotocol/browser-extension-sdk";
+import { reclaimExtensionSDK } from "@umia/zktls-extension-sdk";
 
 reclaimExtensionSDK.initializeBackground();
 ```
+
+Umia's service worker (`web/extension/src/extensionBackground.js`) passes the returned context
+to its provider permission gate.
 
 ## 4. Start a verification
 
@@ -90,12 +97,11 @@ The page never initializes a request itself. It asks the Umia API for a bound se
 hands that config to the SDK; the API keeps the app secret and signs the session server-side.
 
 ```js
-import { reclaimExtensionSDK } from "@reclaimprotocol/browser-extension-sdk";
+import { reclaimExtensionSDK } from "@umia/zktls-extension-sdk";
 
-// The Hub's authenticated call; the API binds the session to the signed-in user and wallet.
+// An authenticated Umia API call; the API binds the session to the signed-in user and wallet.
 const { config } = await api.post("/api/v1/hub/zktls/proof-request", {
   providerId,
-  providerVersion,
   walletAddress,
   target,
 });
@@ -111,16 +117,15 @@ await request.startVerification();
 ```
 
 The config carries a `umia` block (session token, attestor auth, network pin) that the fork checks
-before it opens the provider's site. The Hub's real call site is `requestProof` in
-`web/hub/lib/zktls-extension.ts`. Do not call `init(APP_ID, APP_SECRET, …)` from any client code:
+before it opens the provider's site. Do not call `init(APP_ID, APP_SECRET, …)` from any client code:
 that is the upstream hosted pattern, and the Umia flow never uses it.
 
 ## Troubleshooting
 
 | Issue                                | Fix                                                                                                      |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------- |
-| `Unexpected token 'export'`          | Load `content.bundle.js` from the manifest, not an ESM file                                              |
+| `Unexpected token 'export'`          | Register `content.bundle.js` as the content script, not an ESM file                                      |
 | `must specify Extension ID`          | Pass `{ extensionID }` when starting from a web page                                                     |
-| Provider tab never opens             | Check `initializeBackground()` ran and the content script is registered                                  |
-| Proof generation fails               | Rebuild using the staged pinned assets; check `web_accessible_resources` includes both circuit folders |
-| Assets missing after a fresh install | Restage and verify assets as described in `web/extension/README.md#build`                              |
+| Provider tab never opens             | Check `initializeBackground()` ran and the user granted the Umia app and provider sites                  |
+| Proof generation fails               | Rebuild the extension so the pinned circuits are staged under `browser-rpc/resources/`                   |
+| Assets missing after a fresh install | Rebuild the extension; it restages and verifies the assets (`web/extension/README.md#build`)             |

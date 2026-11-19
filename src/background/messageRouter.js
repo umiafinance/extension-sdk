@@ -10,7 +10,7 @@ import { authorizeStart, validateCaller } from "../utils/session-config";
 import {
   publicProviderData,
   REPLAY_OP,
-  runBoundInjection,
+  runBoundRequestChain,
   runBoundReplay,
 } from "./injectionManager";
 import { failureCode } from "../utils/constants/interfaces";
@@ -199,10 +199,7 @@ export async function handleMessage(ctx, message, sender, sendResponse) {
             ctx.parameters &&
             ctx.sessionId
           ) {
-            // Identifiers and shape, not the whole document. A provider's
-            // requestData is tens of kilobytes and its custom injection can be
-            // far larger; logging it whole is what forced the backend to split
-            // oversized entries in the first place.
+            // Identifiers and shape only: a provider's requestData can be tens of kilobytes.
             loggingHub.info(
               "[BACKGROUND] Sending provider data to content script: " +
                 `${ctx.providerData?.httpProviderId || ctx.providerId} ` +
@@ -307,7 +304,7 @@ export async function handleMessage(ctx, message, sender, sendResponse) {
             });
             ctx.pendingVerificationStart = pendingStart;
             // Sender metadata, not an existing host permission, authorizes this relay.
-            data.session = await authorizeStart(ctx.resolveSessionRoute, data, sender);
+            data.session = await authorizeStart(data, sender);
             delete data.umia;
           } catch (error) {
             const ownsPendingStart = pendingStart && ctx.pendingVerificationStart === pendingStart;
@@ -385,7 +382,7 @@ export async function handleMessage(ctx, message, sender, sendResponse) {
               ctx.sessionId = data.sessionId;
             }
             // Send terminal failure event so the SDK Promise doesn't hang.
-            // The content script no longer fires VERIFICATION_FAILED from the
+            // The content script does not fire VERIFICATION_FAILED from the
             // sendMessage callback, so we must dispatch it through failSession.
             await sessionManager.failSession(ctx, startCode);
           }
@@ -518,7 +515,7 @@ export async function handleMessage(ctx, message, sender, sendResponse) {
           sendResponse({ success: false, error: "REQUEST_REJECTED" });
           break;
         }
-        sessionManager.recordResponseMatchResult(ctx, data.requestHash, data.failed);
+        await sessionManager.recordResponseMatchResult(ctx, data.requestHash, data.failed);
         sendResponse({ success: true });
         break;
       }
@@ -540,133 +537,6 @@ export async function handleMessage(ctx, message, sender, sendResponse) {
           sendResponse({ success: false, error: "Action not supported" });
         }
         break;
-      case ctx.MESSAGE_ACTIONS.UPDATE_PUBLIC_DATA:
-        if (sender.tab?.id && ctx.managedTabs.has(sender.tab.id)) {
-          // Whatever the provider's script scraped off the page — the user's
-          // name, balance, account id. Concatenating it into the message put it
-          // past redaction entirely, because redaction cannot reach inside a
-          // string that was already built at the call site. It travels as a
-          // payload so the level decides: blanked at INFO, raw at FINE.
-          loggingHub.info("[BACKGROUND] Updating public data", "background.data", {
-            payload: { publicData: data?.publicData },
-          });
-          ctx.publicData = typeof data?.publicData === "string" ? data.publicData : null;
-          sendResponse({ success: true });
-        } else {
-          loggingHub.error(
-            "[BACKGROUND] UPDATE_PUBLIC_DATA: Tab is not managed by extension",
-            "background.data",
-          );
-          sendResponse({ success: false, error: "Tab is not managed by extension" });
-        }
-        break;
-      case ctx.MESSAGE_ACTIONS.UPDATE_EXPECT_MANY_CLAIMS: {
-        if (sender.tab?.id && ctx.managedTabs.has(sender.tab.id)) {
-          const turningOff = ctx.expectManyClaims && !data?.expectMany;
-          ctx.expectManyClaims = !!data?.expectMany;
-
-          loggingHub.info(
-            "[BACKGROUND] Updating expect many claims: " + data?.expectMany,
-            "background.claim",
-          );
-
-          // If turning OFF and proofs are already ready, finish now
-          if (turningOff && ctx.generatedProofs.size > 0) {
-            try {
-              loggingHub.info(
-                "[BACKGROUND] Turning off expect many claims, Submitting proofs",
-                "background.proof",
-              );
-              await ctx.submitProofs();
-            } catch {}
-          }
-          sendResponse({ success: true });
-        } else {
-          loggingHub.error(
-            "[BACKGROUND] UPDATE_EXPECT_MANY_CLAIMS: Tab is not managed by extension",
-            "background.claim",
-          );
-          sendResponse({ success: false, error: "Tab is not managed by extension" });
-        }
-        break;
-      }
-      case ctx.MESSAGE_ACTIONS.GET_PARAMETERS:
-        if (sender.tab?.id && ctx.managedTabs.has(sender.tab.id)) {
-          // Key names only. `ctx.parameters` is an object, so concatenating it
-          // logged the literal "[object Object]" — and would have logged the
-          // user's values had it ever been a string.
-          //
-          // FINE, not INFO: a provider script can call getParametersSync() on
-          // every render, and content.js logs "[Content] Parameters get" for
-          // the same event. Two lines per call, saying only that the page asked
-          // for parameters it was given at session start.
-          loggingHub.debug("[BACKGROUND] Getting parameters", "background.data", {
-            payload: { parameters: ctx.parameters || {} },
-          });
-          sendResponse({ success: true, parameters: ctx.parameters || {} });
-        } else {
-          loggingHub.error(
-            "[BACKGROUND] GET_PARAMETERS: Tab is not managed by extension",
-            "background.data",
-          );
-          sendResponse({ success: false, error: "Tab is not managed by extension" });
-        }
-        break;
-      case ctx.MESSAGE_ACTIONS.REPORT_PROVIDER_ERROR: {
-        if (sender.tab?.id && ctx.managedTabs.has(sender.tab.id)) {
-          ctx.aborted = true;
-          await ctx.failSession("PROVIDER_UNAVAILABLE");
-          loggingHub.info(
-            "[BACKGROUND] Provider error reported: " + data?.message,
-            "background.provider",
-          );
-          sendResponse({ success: true });
-        } else {
-          loggingHub.error(
-            "[BACKGROUND] REPORT_PROVIDER_ERROR: Tab is not managed by extension",
-            "background.provider",
-          );
-          sendResponse({ success: false, error: "Tab is not managed by extension" });
-        }
-        break;
-      }
-      case ctx.MESSAGE_ACTIONS.REQUEST_CLAIM: {
-        const claim =
-          source === ctx.MESSAGE_SOURCES.CONTENT_SCRIPT &&
-          target === ctx.MESSAGE_SOURCES.BACKGROUND &&
-          isClaimSender(ctx, sender)
-            ? resolveClaimRequest(ctx, data, { injected: true })
-            : null;
-        if (!claim || !ctx.sessionId) {
-          loggingHub.error("[BACKGROUND] REQUEST_CLAIM: request rejected", "background.claim", {
-            eventType: EVENT_TYPES.TAB_NOT_MANAGED_BY_EXTENSION_EXCEPTION,
-          });
-          sendResponse({ success: false, error: "REQUEST_REJECTED" });
-          break;
-        }
-        try {
-          const result = await ctx.processFilteredRequest(
-            claim.request,
-            claim.criteria,
-            ctx.sessionId,
-            ctx.providerLoginUrl,
-          );
-          loggingHub.info(
-            "[BACKGROUND] Request claim processed: " + claim.criteria.requestHash,
-            "background.claim",
-            { eventType: EVENT_TYPES.PROVIDER_SCRIPT_REQUESTED_CLAIM },
-          );
-          sendResponse({ success: true, result });
-        } catch (e) {
-          loggingHub.error(
-            "[BACKGROUND] Request claim processing failed: " + e?.message,
-            "background.claim",
-            { eventType: EVENT_TYPES.CLAIM_PARAMETER_VALIDATION_FAILED_EXCEPTION },
-          );
-          sendResponse({ success: false, error: e?.message || String(e) });
-        }
-        break;
-      }
       case ctx.MESSAGE_ACTIONS.INJECT_VIA_SCRIPTING: {
         if (
           source !== ctx.MESSAGE_SOURCES.CONTENT_SCRIPT ||
@@ -676,7 +546,7 @@ export async function handleMessage(ctx, message, sender, sendResponse) {
           break;
         }
         sendResponse(
-          await (data?.op === REPLAY_OP ? runBoundReplay : runBoundInjection)(ctx, sender, data),
+          await (data?.op === REPLAY_OP ? runBoundReplay : runBoundRequestChain)(ctx, sender, data),
         );
         break;
       }
@@ -684,9 +554,8 @@ export async function handleMessage(ctx, message, sender, sendResponse) {
         // The offscreen document's replies are consumed by the dedicated
         // one-shot listeners in claim-creator / proof-generator, but this router
         // sees every chrome.runtime message, so they reach the default case too.
-        // Reporting them as errors made every SUCCESSFUL session carry two
-        // ERROR lines — noise that hides the real ones. They are answered by
-        // their own listener, so this must not sendResponse either.
+        // They are answered by their own listener, so this neither logs them as
+        // errors nor calls sendResponse.
         if (OFFSCREEN_REPLY_ACTIONS.has(action)) {
           break;
         }

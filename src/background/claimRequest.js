@@ -1,4 +1,4 @@
-import { describeRequestMatch, MATCH_STAGES } from "../utils/claim-creator/network-filter";
+import { describeRequestMatch } from "../utils/claim-creator/network-filter";
 
 // The browser sets these on the real request; a page-reported value must never reach the claim.
 const BROWSER_OWNED_HEADERS = new Set(["cookie", "origin", "referer"]);
@@ -67,7 +67,6 @@ function pageRequest(raw) {
     headers,
     body: typeof raw.body === "string" ? raw.body : null,
     ...(typeof raw.responseText === "string" ? { responseText: raw.responseText } : {}),
-    extractedParams: stringRecord(raw.extractedParams),
   };
 }
 
@@ -79,21 +78,14 @@ function recipeEntry(entries, requestHash) {
 /**
  * Pair a page-reported request with the pinned recipe entry it claims to satisfy. The
  * criteria are the recipe's, never the page's, and the request must still match them.
- * An injected claim carries no response: the attestor fetches it.
  *
  * @returns {{request: Object, criteria: Object} | null}
  */
-export function resolveClaimRequest(ctx, data, { injected = false } = {}) {
-  const list = (value) => (Array.isArray(value) ? value : []);
-  const provider = ctx.providerData;
-  const entries = injected
-    ? [...list(provider?.requestData), ...list(provider?.allowedInjectedRequestData)]
-    : list(provider?.requestData);
+export function resolveClaimRequest(ctx, data) {
+  const entries = Array.isArray(ctx.providerData?.requestData) ? ctx.providerData.requestData : [];
   const criteria = recipeEntry(entries, data?.requestHash);
   const request = pageRequest(data?.request);
   if (!criteria || !request || !isSignedHost(ctx, request.url)) return null;
-  if (injected) delete request.responseText;
   const verdict = describeRequestMatch(request, criteria, ctx.parameters || {});
-  const accepted = verdict.matched || (injected && verdict.stage === MATCH_STAGES.RESPONSE_MISSING);
-  return accepted ? { request, criteria } : null;
+  return verdict.matched ? { request, criteria } : null;
 }

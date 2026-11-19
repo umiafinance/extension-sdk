@@ -8,8 +8,8 @@
  *
  *     describeRequestMatch  ->  extractParamsFromResponse  ->  assertClaimShape
  *
- * The expected parameter values are the ones a real session actually produced
- * (session 2b46b57c39), read back out of its logs — not values invented here.
+ * The expected parameter values are the ones a real session produced, not
+ * values invented here.
  * If any stage drifts, this fails with the provider that every developer uses
  * as their first smoke test.
  *
@@ -21,9 +21,9 @@
  * matches the real attestor) and attestor-zk-engine.test.js (the pinned build
  * can actually generate a proof).
  *
- * The provider walks three ORIGINS — example.org -> example.com ->
- * jsonplaceholder — which is why it is also the case that broke the popup's
- * claim counter; see claim-progress.test.js.
+ * The provider walks three ORIGINS (example.org -> example.com ->
+ * jsonplaceholder), which is also why the popup's claim counter comes from the
+ * background; see claim-progress.test.js.
  */
 
 import { describe, it } from "node:test";

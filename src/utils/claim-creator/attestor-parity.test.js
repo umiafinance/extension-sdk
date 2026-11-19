@@ -8,7 +8,7 @@
  * out of upstream's test file.
  *
  * How it reaches the functions: the extractors aren't exported from the package
- * root until 5.1.0 (PR #92). But the `./external-rpc` subpath is exported, and
+ * root until 5.1.0. But the `./external-rpc` subpath is exported, and
  * its `handleIncomingMessage` dispatches `extractHtmlElement` /
  * `extractJSONValueIndex` straight to the same providers/http/utils.ts
  * functions. So we drive the attestor through its own RPC surface and compare.

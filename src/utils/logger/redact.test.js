@@ -1,8 +1,6 @@
 /**
- * These logs leave the device. The router used to stringify the whole
- * templateData into a log line, which put the session `signature` and the
- * provider `parameters` — the user's actual private data — into Loki. These
- * tests exist to keep that from coming back.
+ * Log payloads are redacted so the session `signature` and the provider
+ * `parameters` (the user's actual private data) never appear in a log line.
  */
 
 import { describe, it } from "node:test";
@@ -95,8 +93,8 @@ describe("attestor-shaped values", () => {
     const out = redact({
       identifier: "0xabc",
       claimData: {
-        parameters: JSON.stringify({ paramValues: { username: "sajjad21990" } }),
-        context: JSON.stringify({ extractedParameters: { username: "sajjad21990" } }),
+        parameters: JSON.stringify({ paramValues: { username: "exampleuser" } }),
+        context: JSON.stringify({ extractedParameters: { username: "exampleuser" } }),
       },
     });
     assert.equal(out.claimData, "[REDACTED]");
@@ -104,14 +102,13 @@ describe("attestor-shaped values", () => {
   });
 
   it("redacts user-data keys whose value is a STRING, not just an object", () => {
-    // The attestor serialises these. A `typeof val === "object"` guard let the
-    // whole blob through: this is the bug that published extractedParameters.
+    // The attestor serialises these, so a string value must be redacted too.
     const out = redact({
-      parameters: JSON.stringify({ paramValues: { username: "sajjad21990" } }),
+      parameters: JSON.stringify({ paramValues: { username: "exampleuser" } }),
       publicData: "scraped-display-name",
-      paramValues: { username: "sajjad21990" },
+      paramValues: { username: "exampleuser" },
     });
-    assert.ok(!JSON.stringify(out).includes("sajjad21990"));
+    assert.ok(!JSON.stringify(out).includes("exampleuser"));
     assert.ok(!JSON.stringify(out).includes("scraped-display-name"));
     assert.match(out.parameters, /^<redacted:\d+ chars>$/);
     assert.match(out.publicData, /^<redacted:\d+ chars>$/);

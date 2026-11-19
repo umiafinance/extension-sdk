@@ -42,7 +42,7 @@ export class BoundAttestorSessions {
   open(session) {
     const authRequest = signedAuthRequest(session);
     const { sessionId, umia, route } = session;
-    const routeKey = `${route.attestorUrl}|${route.authority.digest}|${route.authority.validUntil}`;
+    const routeKey = `${route.attestorUrl}|${route.witness}|${route.network.authorityDigest}`;
     let group = this.sessions.get(sessionId);
     if (
       group &&

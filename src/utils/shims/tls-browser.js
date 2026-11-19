@@ -1,4 +1,3 @@
-// src/utils/shims/tls-browser.js
 export function strToUint8Array(str) {
   return new TextEncoder().encode(str);
 }
