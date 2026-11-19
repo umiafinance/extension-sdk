@@ -11,6 +11,8 @@ node_modules
 
 # Build outputs
 build/
+# Compiled by `bun run build:mark-css`; the Hub's build-sdk step runs it before dev and build.
+src/ui/assets/umia-mark-css.generated.js
 dist/
 **/dist/
 

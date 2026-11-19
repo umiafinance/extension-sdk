@@ -1,7 +1,8 @@
 import {
   ZKTLS_DEVNET_CHAIN_ID,
   ZKTLS_EXTENSION_ORIGIN_ALLOWLIST,
-} from "@umia/types/zktls-self-host";
+  ZKTLS_SHARED_ATTESTOR,
+} from "@umia/zktls-config/self-host";
 import { freezeBoundSession, freezeSessionRoute } from "./session-transport.js";
 
 const ADDRESS = /^0x[0-9a-f]{40}$/;
@@ -10,6 +11,7 @@ const SIGNATURE = /^0x[0-9a-fA-F]{130}$/;
 const SESSION_TOKEN = /^[0-9a-f]{64}$/;
 const IDENTITY_PROVIDER = /^[a-z][a-z0-9_]{0,63}$/;
 const CLAIM_HASH = /^0x[0-9a-f]{64}$/;
+const NETWORK_FIELDS = ["authorityDigest", "beaconAddress", "chainId", "environment", "expectedEpoch"].join();
 
 function authIdMatchesSession(id, sessionId) {
   if (id === sessionId) return true; // Existing session fixtures and older clients.
@@ -85,7 +87,12 @@ function exactUrl(value, expected, kind) {
 
 function callerOrigin(sender) {
   const source = sender?.url || sender?.origin;
-  if (typeof source !== "string" || /[%\\?#]|\/\.{1,2}(?:\/|$)/.test(source)) {
+  // Chrome retains an OAuth callback's document URL after history.replaceState clears
+  // the address bar. Query/fragment data does not change the caller's trusted origin.
+  if (
+    typeof source !== "string" ||
+    /[%\\]|\/\.{1,2}(?:\/|$)/.test(source.split(/[?#]/, 1)[0])
+  ) {
     throw new Error("Invalid caller URL");
   }
   let url;
@@ -117,21 +124,27 @@ function callerOrigin(sender) {
   return url.origin;
 }
 
+// The extension narrows this to the profiles its build serves before any session starts.
+let approvedProfiles = ZKTLS_EXTENSION_ORIGIN_ALLOWLIST;
+
+export function approveProfiles(names) {
+  const selected = ZKTLS_EXTENSION_ORIGIN_ALLOWLIST.filter((entry) =>
+    names.includes(entry.profile),
+  );
+  if (selected.length === 0 || selected.length !== new Set(names).size) {
+    throw new Error("Unknown endpoint profile");
+  }
+  approvedProfiles = Object.freeze(selected);
+}
+
+export function approvedProfileNames() {
+  return approvedProfiles.map((entry) => entry.profile);
+}
+
 function matchingProfile(selectedProfile, profiles) {
   const profile = profiles.find((entry) => entry.profile === selectedProfile);
   if (!profile) throw new Error("Endpoint profile is not configured");
   return profile;
-}
-
-export function requirePinnedVersion(value) {
-  if (
-    typeof value !== "string" ||
-    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value) ||
-    value.toLowerCase() === "latest"
-  ) {
-    throw new Error("Exact provider version is required");
-  }
-  return value;
 }
 
 export function requireSessionToken(value) {
@@ -141,7 +154,7 @@ export function requireSessionToken(value) {
   return value;
 }
 
-export function approvedBackendUrl(value, profiles = ZKTLS_EXTENSION_ORIGIN_ALLOWLIST) {
+export function approvedBackendUrl(value, profiles = approvedProfiles) {
   for (const profile of profiles) {
     try {
       exactUrl(value, profile.backendUrl, "backend");
@@ -152,14 +165,11 @@ export function approvedBackendUrl(value, profiles = ZKTLS_EXTENSION_ORIGIN_ALLO
 }
 
 export async function authorizeStart(
-  resolveSessionRoute,
   request,
   sender,
-  profiles = ZKTLS_EXTENSION_ORIGIN_ALLOWLIST,
+  profiles = approvedProfiles,
+  attestor = ZKTLS_SHARED_ATTESTOR,
 ) {
-  if (typeof resolveSessionRoute !== "function") {
-    throw new Error("Session route resolver is required");
-  }
   if (
     typeof request?.sessionId !== "string" ||
     !request.sessionId ||
@@ -178,71 +188,34 @@ export async function authorizeStart(
   if (!profiles.some((profile) => profile.callerOrigin === origin)) {
     throw new Error("Caller is not approved");
   }
-  // The candidate only disambiguates catalogue rows; it grants no destination.
-  const candidate = {
-    backendUrl: request?.umia?.backendUrl,
-    attestorUrl: request?.umia?.attestorUrl,
-    witness: request?.umia?.witness,
-    network: structuredClone(request?.umia?.network),
-  };
-  const resolved = await resolveSessionRoute({ sender, sessionId: request.sessionId, candidate });
-  if (!resolved) throw new Error("Session route is not provisioned");
-  const profile = validateCaller(sender, resolved.profile, profiles);
-  const authority = structuredClone(resolved.authority);
-  if (
-    !authority ||
-    authority.environment !== profile.environment ||
-    authority.attestorUrl !== profile.attestorUrl ||
-    !Array.isArray(authority.witnesses) ||
-    authority.witnesses.length !== 1 ||
-    authority.minimumWitnesses !== 1 ||
-    typeof authority.validUntil !== "string" ||
-    !Number.isFinite(Date.parse(authority.validUntil)) ||
-    new Date(authority.validUntil).toISOString() !== authority.validUntil ||
-    Date.parse(authority.validUntil) <= Date.now()
-  ) {
-    throw new Error("Session route authority mismatch");
-  }
-  if (authority.environment === "devnet" && authority.chainId !== ZKTLS_DEVNET_CHAIN_ID) {
-    throw new Error("UNSUPPORTED_NETWORK");
-  }
-  const network = {
-    environment: authority.environment,
-    chainId: authority.chainId,
-    beaconAddress: authority.beaconAddress,
-    expectedEpoch: authority.epoch,
-    authorityDigest: authority.digest,
-  };
+  // One caller origin can serve several environments; the session's network picks one.
+  const matches = profiles.filter(
+    (profile) =>
+      profile.callerOrigin === origin &&
+      profile.backendUrl === request.umia?.backendUrl &&
+      profile.attestorUrl === attestor.url &&
+      profile.environment === request.umia?.network?.environment,
+  );
+  if (matches.length !== 1) throw new Error("Session route is not provisioned");
+  const [profile] = matches;
+  const umia = validateSessionConfig(request, sender, profile, attestor);
   const route = freezeSessionRoute({
     profile: profile.profile,
     callerOrigin: profile.callerOrigin,
     backendUrl: profile.backendUrl,
-    attestorUrl: profile.attestorUrl,
-    witness: authority.witnesses[0],
-    network,
-    authority,
+    attestorUrl: attestor.url,
+    witness: attestor.signerAddress,
+    network: umia.network,
   });
-  const umia = validateSessionConfig(
-    request,
-    sender,
-    route.profile,
-    { ...network, witness: route.witness, attestorUrl: route.attestorUrl },
-    profiles,
-  );
   const bound = freezeBoundSession({ sessionId: request.sessionId, umia, route });
-  // The auth must also end before the selected authority; fail now, not after provider login.
+  // The auth must also end before the session; fail now, not after provider login.
   requireAttestorAuth(bound);
   return bound;
 }
 
-// The bound session stops working once its signed auth, its own expiry or its
-// selected authority lapses, whichever comes first.
-export function boundSessionDeadline({ umia, route }) {
-  return Math.min(
-    umia.attestorAuth.data.expiresAt * 1000,
-    Date.parse(umia.expiresAt),
-    Date.parse(route.authority.validUntil),
-  );
+// The bound session stops working once its signed auth or its own expiry lapses.
+export function boundSessionDeadline({ umia }) {
+  return Math.min(umia.attestorAuth.data.expiresAt * 1000, Date.parse(umia.expiresAt));
 }
 
 export function requireLiveSession(session) {
@@ -251,18 +224,15 @@ export function requireLiveSession(session) {
     typeof sessionId !== "string" ||
     !sessionId ||
     !authIdMatchesSession(umia?.attestorAuth?.data?.id, sessionId) ||
-    !route?.authority
+    !route?.network
   ) {
     throw new Error("Bound session route mismatch");
   }
-  const authorityExpiry = Date.parse(route.authority.validUntil);
   const sessionExpiry = Date.parse(umia.expiresAt);
   const authExpiry = umia.attestorAuth.data.expiresAt;
   if (
-    !Number.isFinite(authorityExpiry) ||
     !Number.isFinite(sessionExpiry) ||
     !Number.isInteger(authExpiry) ||
-    authorityExpiry <= Date.now() ||
     sessionExpiry <= Date.now() ||
     authExpiry * 1000 <= Date.now()
   ) {
@@ -272,37 +242,26 @@ export function requireLiveSession(session) {
 }
 
 // Recheck the exact signed fields at client construction and before socket use.
-// The auth may expire sooner than either the session or its selected authority.
+// The auth may expire sooner than the session.
 export function requireAttestorAuth(session) {
   requireLiveSession(session);
-  const { sessionId, umia, route } = session;
-  return checkAttestorAuth(
-    umia.attestorAuth,
-    sessionId,
-    Date.parse(umia.expiresAt),
-    Date.parse(route.authority.validUntil),
-  );
+  const { sessionId, umia } = session;
+  return checkAttestorAuth(umia.attestorAuth, sessionId, Date.parse(umia.expiresAt));
 }
 
 export function validateCaller(
   sender,
   selectedProfile,
-  profiles = ZKTLS_EXTENSION_ORIGIN_ALLOWLIST,
+  profiles = approvedProfiles,
 ) {
   const profile = matchingProfile(selectedProfile, profiles);
   if (callerOrigin(sender) !== profile.callerOrigin) throw new Error("Caller is not approved");
   return profile;
 }
 
-// The selected network is supplied by extension-owned configuration, never by a page message.
-export function validateSessionConfig(
-  request,
-  sender,
-  selectedProfile,
-  selectedNetwork,
-  profiles = ZKTLS_EXTENSION_ORIGIN_ALLOWLIST,
-) {
-  const profile = validateCaller(sender, selectedProfile, profiles);
+// The extension trusts only the shared attestor; the API's network reference must name it.
+export function validateSessionConfig(request, sender, profile, attestor = ZKTLS_SHARED_ATTESTOR) {
+  if (callerOrigin(sender) !== profile.callerOrigin) throw new Error("Caller is not approved");
   const umia = request?.umia;
   if (!umia || typeof umia !== "object" || Array.isArray(umia)) {
     throw new Error("Bound session configuration is required");
@@ -313,16 +272,31 @@ export function validateSessionConfig(
   if (typeof request.providerId !== "string" || !request.providerId) {
     throw new Error("Invalid provider ID");
   }
-  exactUrl(umia.backendUrl, profile.backendUrl, "backend");
-  exactUrl(umia.attestorUrl, profile.attestorUrl, "attestor");
-  if (!ADDRESS.test(umia.witness)) throw new Error("Invalid witness");
-  requirePinnedVersion(umia.providerVersion);
+  const network = umia.network;
   if (
-    (request.providerVersion && request.providerVersion !== umia.providerVersion) ||
-    (request.resolvedProviderVersion && request.resolvedProviderVersion !== umia.providerVersion)
+    !network ||
+    typeof network !== "object" ||
+    Array.isArray(network) ||
+    Object.keys(network).sort().join() !== NETWORK_FIELDS
   ) {
-    throw new Error("Provider version mismatch");
+    throw new Error("Session network is required");
   }
+  if (network.environment === "devnet" && network.chainId !== ZKTLS_DEVNET_CHAIN_ID) {
+    throw new Error("UNSUPPORTED_NETWORK");
+  }
+  if (
+    network.environment !== profile.environment ||
+    !Number.isSafeInteger(network.chainId) ||
+    network.chainId < 1 ||
+    !ADDRESS.test(network.beaconAddress) ||
+    network.expectedEpoch !== attestor.claimEpoch ||
+    !DIGEST.test(network.authorityDigest) ||
+    umia.witness !== attestor.signerAddress
+  ) {
+    throw new Error("Session network authority mismatch");
+  }
+  exactUrl(umia.backendUrl, profile.backendUrl, "backend");
+  exactUrl(umia.attestorUrl, attestor.url, "attestor");
   requireSessionToken(umia.sessionToken);
   const expiresAt = Date.parse(umia.expiresAt);
   if (
@@ -333,28 +307,5 @@ export function validateSessionConfig(
     throw new Error("Session expiry invalid");
   if (expiresAt <= Date.now()) throw new Error("SESSION_EXPIRED");
   checkAttestorAuth(umia.attestorAuth, request.sessionId, expiresAt);
-  const network = umia.network;
-  if (!selectedNetwork || !network || typeof network !== "object") {
-    throw new Error("Selected network is required");
-  }
-  if (network.environment === "devnet" && network.chainId !== ZKTLS_DEVNET_CHAIN_ID) {
-    throw new Error("UNSUPPORTED_NETWORK");
-  }
-  if (
-    network.environment !== profile.environment ||
-    network.environment !== selectedNetwork.environment ||
-    network.chainId !== selectedNetwork.chainId ||
-    network.beaconAddress !== selectedNetwork.beaconAddress ||
-    network.expectedEpoch !== selectedNetwork.expectedEpoch ||
-    network.authorityDigest !== selectedNetwork.authorityDigest ||
-    !ADDRESS.test(network.beaconAddress) ||
-    !Number.isInteger(network.expectedEpoch) ||
-    network.expectedEpoch < 1 ||
-    !DIGEST.test(network.authorityDigest) ||
-    umia.witness !== selectedNetwork.witness ||
-    umia.attestorUrl !== selectedNetwork.attestorUrl
-  ) {
-    throw new Error("Selected network authority mismatch");
-  }
   return structuredClone(umia);
 }

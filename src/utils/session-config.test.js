@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ZKTLS_EXTENSION_ORIGIN_ALLOWLIST } from "@umia/types/zktls-self-host";
+import { ZKTLS_EXTENSION_ORIGIN_ALLOWLIST } from "@umia/zktls-config/self-host";
 import {
   authorizeStart,
   boundSessionDeadline,
@@ -43,8 +43,6 @@ function fixture() {
   return {
     sessionId: "session-one",
     providerId: "provider-one",
-    providerVersion: "v7",
-    resolvedProviderVersion: "v7",
     applicationId: "app-one",
     signature: "public-signature",
     timestamp: String(Date.now()),
@@ -53,7 +51,6 @@ function fixture() {
       backendUrl: approved.backendUrl,
       attestorUrl: approved.attestorUrl,
       witness,
-      providerVersion: "v7",
       sessionToken: "a".repeat(64),
       attestorAuth: {
         data: {
@@ -76,25 +73,12 @@ function fixture() {
   };
 }
 
-function validate(request = fixture(), from = sender, chosen = selectedNetwork) {
-  return validateSessionConfig(request, from, approved.profile, chosen, profiles);
+function validate(request = fixture(), from = sender) {
+  return validateSessionConfig(request, from, approved, attestor());
 }
 
-function authority(profile, network) {
-  return {
-    environment: network.environment,
-    chainId: network.chainId,
-    beaconAddress: network.beaconAddress,
-    epoch: network.expectedEpoch,
-    attestorUrl: profile.attestorUrl,
-    witnesses: [witness],
-    minimumWitnesses: 1,
-    sourceBlockNumber: "1",
-    sourceBlockHash: `0x${"e".repeat(64)}`,
-    observedAt: new Date().toISOString(),
-    validUntil: new Date(Date.now() + 3600_000).toISOString(),
-    digest: network.authorityDigest,
-  };
+function attestor(profile = approved) {
+  return { url: profile.attestorUrl, signerAddress: witness, claimEpoch: 2 };
 }
 
 function route(profile = approved, network = selectedNetwork) {
@@ -111,11 +95,10 @@ function route(profile = approved, network = selectedNetwork) {
       expectedEpoch: network.expectedEpoch,
       authorityDigest: network.authorityDigest,
     },
-    authority: authority(profile, network),
   };
 }
 
-const CREDENTIAL_KEYS = ["providerVersion", "sessionToken", "attestorAuth", "expiresAt"];
+const CREDENTIAL_KEYS = ["sessionToken", "attestorAuth", "expiresAt"];
 
 function bound({ sessionId = "session-one", umia = fixture().umia, sessionRoute = route() } = {}) {
   return freezeBoundSession({ sessionId, umia, route: sessionRoute });
@@ -138,11 +121,14 @@ describe("bound SDK session routing", () => {
     );
     const offscreen = takeOffscreenSession({
       ...offscreenMessage,
+      profiles: ["mainnet"],
       client: {
         ...offscreenMessage.client,
         authRequest: { data: { hostWhitelist: ["attacker.example"] } },
       },
     });
+    assert.deepEqual(offscreen.profiles, ["mainnet"]);
+    assert.equal(offscreen.claim.profiles, undefined);
     assert.deepEqual(Object.keys(offscreen.session.umia), CREDENTIAL_KEYS);
     for (const key of CREDENTIAL_KEYS) {
       assert.deepEqual(offscreen.session.umia[key], request.umia[key]);
@@ -189,17 +175,6 @@ describe("bound SDK session routing", () => {
       },
       (r) => {
         r.umia.expiresAt = "2000-01-01T00:00:00.000Z";
-      },
-      (r) => {
-        r.umia.providerVersion = "latest";
-      },
-      (r) => {
-        r.umia.providerVersion = "latest";
-        r.providerVersion = "latest";
-        r.resolvedProviderVersion = "latest";
-      },
-      (r) => {
-        r.resolvedProviderVersion = "v8";
       },
       (r) => {
         r.umia.sessionId = "other";
@@ -255,26 +230,24 @@ describe("bound SDK session routing", () => {
     assert.deepEqual(validate(), fixture().umia);
     assert.equal(validateCaller(sender, approved.profile).profile, approved.profile);
     for (const url of [
-      "https://admin.umia.conductor:8443/auction/1",
-      "https://hub.umia.conductor/auction/1",
-      "https://hub.umia.conductor.evil:8443/auction/1",
-      "https://hub.umia.conductor:8444/auction/1",
-      "http://hub.umia.conductor:8443/auction/1",
-      "https://user@hub.umia.conductor:8443/auction/1",
-      "https://hub.umia.conductor:8443/%2e%2e/auction/1",
-      "https://hub.umia.conductor:8443/auction/1?token=x",
-      "https://hub.umia.conductor:8443/auction/1#part",
+      "https://admin.umia.localhost/auction/1",
+      "https://hub.umia.localhost:8443/auction/1",
+      "https://hub.umia.localhost.evil/auction/1",
+      "https://hub.umia.localhost:444/auction/1",
+      "http://hub.umia.localhost/auction/1",
+      "https://user@hub.umia.localhost/auction/1",
+      "https://hub.umia.localhost/%2e%2e/auction/1",
     ])
       assert.throws(() => validate(fixture(), { url, permissionsGranted: true }));
     for (const backendUrl of [
-      "https://api.umia.conductor/zktls",
-      "https://api.umia.conductor:8443/zktls-evil",
-      "https://api.umia.conductor:8443/zktls/",
-      "https://admin.umia.conductor:8443/zktls",
-      "https://api.umia.conductor:8443/zktls/../zktls",
-      "https://api.umia.conductor:8443/zktls?token=x",
-      "https://api.umia.conductor:8443/zktls#x",
-      "https://user@api.umia.conductor:8443/zktls",
+      "https://api.umia.localhost:8443/zktls",
+      "https://api.umia.localhost/zktls-evil",
+      "https://api.umia.localhost/zktls/",
+      "https://admin.umia.localhost/zktls",
+      "https://api.umia.localhost/zktls/../zktls",
+      "https://api.umia.localhost/zktls?token=x",
+      "https://api.umia.localhost/zktls#x",
+      "https://user@api.umia.localhost/zktls",
     ]) {
       const request = fixture();
       request.umia.backendUrl = backendUrl;
@@ -290,6 +263,29 @@ describe("bound SDK session routing", () => {
       const request = fixture();
       request.umia.attestorUrl = attestorUrl;
       assert.throws(() => validate(request));
+    }
+  });
+
+  it("authorizes an OAuth callback document by its exact origin after the page clears its query", async () => {
+    for (const suffix of [
+      "?privy_oauth_state=state&privy_oauth_provider=github&privy_oauth_code=code%2F%2B%3D",
+      "#pass",
+      "?next=https%3A%2F%2Fevil.example%2F#pass",
+    ]) {
+      // Chrome's sender.url retains the original document URL after history.replaceState.
+      const from = { ...sender, url: `${approved.callerOrigin}/portfolio${suffix}` };
+      assert.equal(validateCaller(from, approved.profile).callerOrigin, approved.callerOrigin);
+      const session = await authorizeStart(fixture(), from, profiles, attestor());
+      assert.equal(session.route.callerOrigin, approved.callerOrigin);
+      assert.throws(() => validate(fixture(), { ...from, origin: "https://evil.example" }));
+      await assert.rejects(
+        authorizeStart(
+          fixture(),
+          { ...from, url: `https://evil.example/portfolio${suffix}` },
+          profiles,
+          attestor(),
+        ),
+      );
     }
   });
 
@@ -309,14 +305,11 @@ describe("bound SDK session routing", () => {
     );
   });
 
-  it("accepts devnet Monad 10143 and rejects Base 84532 and mismatched authority", () => {
+  it("accepts devnet Monad 10143 and rejects Base 84532 and a network the attestor does not sign", () => {
     assert.equal(validate().network.chainId, 10143);
     const base = fixture();
     base.umia.network.chainId = 84532;
-    assert.throws(
-      () => validate(base, sender, { ...selectedNetwork, chainId: 84532 }),
-      /UNSUPPORTED_NETWORK/,
-    );
+    assert.throws(() => validate(base), /UNSUPPORTED_NETWORK/);
     for (const field of ["beaconAddress", "expectedEpoch", "authorityDigest"]) {
       const request = fixture();
       request.umia.network[field] = field === "expectedEpoch" ? 3 : "wrong";
@@ -327,152 +320,63 @@ describe("bound SDK session routing", () => {
     assert.throws(() => validate(wrongEnvironment), /authority mismatch/);
   });
 
-  it("resolves each session in extension context without accepting page route overrides", async () => {
-    const testnetProfile = ZKTLS_EXTENSION_ORIGIN_ALLOWLIST.find(
-      (p) => p.profile === "cloud-testnet",
-    );
-    const activeProfiles = [approved, testnetProfile];
-    const testnetNetwork = {
-      ...selectedNetwork,
-      environment: "testnet",
-      chainId: 8453,
-      attestorUrl: testnetProfile.attestorUrl,
-    };
-    const routes = new Map([
-      [
-        "session-one",
-        { profile: approved.profile, authority: authority(approved, selectedNetwork) },
-      ],
-      [
-        "session-two",
-        { profile: testnetProfile.profile, authority: authority(testnetProfile, testnetNetwork) },
-      ],
-    ]);
-    const received = [];
-    const resolver = async (metadata) => {
-      received.push(metadata);
-      return routes.get(metadata.sessionId) || null;
-    };
+  it("starts each session on the caller's profile for its network and the shared attestor", async () => {
+    const testnetProfile = { ...approved, profile: "native-testnet", environment: "testnet" };
+    const start = (request, from = sender) =>
+      authorizeStart(request, from, [approved, testnetProfile], attestor());
     const first = fixture();
-    const firstBound = await authorizeStart(resolver, first, sender, activeProfiles);
+    const firstBound = await start(first);
     assert.equal(firstBound.sessionId, "session-one");
     assert.deepEqual(Object.keys(firstBound.umia), CREDENTIAL_KEYS);
+    assert.equal(firstBound.route.profile, approved.profile);
     assert.equal(firstBound.route.backendUrl, approved.backendUrl);
     assert.equal(firstBound.route.witness, witness);
     assert.equal(Object.isFrozen(firstBound.umia.attestorAuth.data.hostWhitelist), true);
-    assert.equal(Object.isFrozen(firstBound.route.authority.witnesses), true);
+    assert.equal(Object.isFrozen(firstBound.route.network), true);
     const second = fixture();
     second.sessionId = "session-two";
     second.umia.network.environment = "testnet";
     second.umia.network.chainId = 8453;
-    second.umia.attestorUrl = testnetProfile.attestorUrl;
     second.umia.attestorAuth.data.id = "session-two";
-    const secondBound = await authorizeStart(resolver, second, sender, activeProfiles);
-    assert.equal(secondBound.route.attestorUrl, testnetProfile.attestorUrl);
-    assert.equal(firstBound.route.authority.attestorUrl, approved.attestorUrl);
-    assert.equal(firstBound.route.attestorUrl, approved.attestorUrl);
-    assert.deepEqual(
-      received.map((m) => Object.keys(m)),
-      [
-        ["sender", "sessionId", "candidate"],
-        ["sender", "sessionId", "candidate"],
-      ],
-    );
-    assert.equal(received[0].sender, sender);
-    assert.deepEqual(Object.keys(received[0].candidate), [
-      "backendUrl",
-      "attestorUrl",
-      "witness",
-      "network",
-    ]);
-    assert.equal(JSON.stringify(received[0].candidate).includes(first.umia.sessionToken), false);
-    assert.equal(JSON.stringify(received[0].candidate).includes("attestorAuth"), false);
-    second.umia.backendUrl = "https://api.umia.conductor:8443/zktls-evil";
-    await assert.rejects(authorizeStart(resolver, second, sender, activeProfiles));
-    second.umia.backendUrl = testnetProfile.backendUrl;
-    second.umia.network.chainId = 10143;
-    await assert.rejects(authorizeStart(resolver, second, sender, activeProfiles));
-    routes.get("session-one").authority.validUntil = "2000-01-01T00:00:00.000Z";
+    assert.equal((await start(second)).route.profile, testnetProfile.profile);
+    const network = second.umia.network;
+    for (const [changed, message] of [
+      [{ backendUrl: `${approved.backendUrl}-evil` }, /not provisioned/],
+      [{ network: { ...network, environment: "mainnet" } }, /not provisioned/],
+      [{ attestorUrl: "wss://attestor.example/ws" }, /Unapproved attestor URL/],
+      [{ witness: `0x${"f".repeat(40)}` }, /authority mismatch/],
+      [{ network: { ...network, expectedEpoch: 3 } }, /authority mismatch/],
+      [{ network: { ...network, extra: true } }, /Session network is required/],
+    ]) {
+      await assert.rejects(start({ ...second, umia: { ...second.umia, ...changed } }), message);
+    }
+    const admin = "https://admin.umia.localhost";
     await assert.rejects(
-      authorizeStart(resolver, first, sender, activeProfiles),
-      /authority mismatch/,
-    );
-    routes.get("session-one").authority = authority(approved, selectedNetwork);
-    routes.get("session-one").authority.witnesses[0] = `0x${"f".repeat(40)}`;
-    assert.equal(firstBound.route.authority.witnesses[0], witness);
-    await assert.rejects(
-      authorizeStart(resolver, first, sender, activeProfiles),
-      /authority mismatch/,
-    );
-    routes.get("session-one").authority = authority(approved, selectedNetwork);
-    assert.equal(
-      (await authorizeStart(resolver, first, sender, activeProfiles)).route.witness,
-      witness,
-    );
-    routes.delete("session-one");
-    await assert.rejects(
-      authorizeStart(resolver, first, sender, activeProfiles),
-      /not provisioned/,
-    );
-    routes.set("session-one", {
-      profile: approved.profile,
-      authority: authority(approved, selectedNetwork),
-    });
-    const resolverCalls = received.length;
-    await assert.rejects(
-      authorizeStart(
-        resolver,
-        first,
-        {
-          ...sender,
-          url: "https://admin.umia.conductor:8443/auction/1",
-          origin: "https://admin.umia.conductor:8443",
-          permissionsGranted: true,
-        },
-        activeProfiles,
-      ),
+      start(first, { ...sender, url: `${admin}/auction/1`, origin: admin, permissionsGranted: true }),
       /Caller is not approved/,
     );
-    assert.equal(received.length, resolverCalls);
-    await assert.rejects(
-      authorizeStart(null, first, sender, activeProfiles),
-      /resolver is required/,
-    );
-    await assert.rejects(
-      authorizeStart(resolver, first, { ...sender, frameId: 1 }, activeProfiles),
-      /top frame/,
-    );
-    await assert.rejects(
-      authorizeStart(resolver, first, { ...sender, tab: undefined }, activeProfiles),
-      /top frame/,
-    );
+    await assert.rejects(start(first, { ...sender, frameId: 1 }), /top frame/);
+    await assert.rejects(start(first, { ...sender, tab: undefined }), /top frame/);
     const originalChrome = globalThis.chrome;
     globalThis.chrome = { runtime: { id: "approved-extension" } };
     try {
       await assert.rejects(
-        authorizeStart(resolver, first, { ...sender, id: "other-extension" }, activeProfiles),
+        start(first, { ...sender, id: "other-extension" }),
         /Wrong extension sender/,
       );
-      await authorizeStart(
-        resolver,
-        first,
-        { ...sender, id: "approved-extension" },
-        activeProfiles,
-      );
+      await start(first, { ...sender, id: "approved-extension" });
     } finally {
       globalThis.chrome = originalChrome;
     }
   });
 
-  it("rejects at start a signed auth that outlives its authority or predates the epoch", async () => {
+  it("rejects at start a signed auth that outlives its session or predates the epoch", async () => {
     const request = fixture();
-    const shortAuthority = authority(approved, selectedNetwork);
-    shortAuthority.validUntil = new Date(
+    request.umia.expiresAt = new Date(
       (request.umia.attestorAuth.data.expiresAt - 60) * 1000,
     ).toISOString();
-    const resolver = async () => ({ profile: approved.profile, authority: shortAuthority });
     await assert.rejects(
-      authorizeStart(resolver, request, sender, profiles),
+      authorizeStart(request, sender, profiles, attestor()),
       /Invalid attestor authorization/,
     );
     const negative = fixture();
@@ -484,15 +388,13 @@ describe("bound SDK session routing", () => {
 function pinnedProvider() {
   return {
     id: "provider-one",
-    version: "v7",
-    versionNumber: "v7",
     recipeDigest: `sha256:${"a".repeat(64)}`,
     providerConfigs: [{ loginUrl: "https://provider.example/login" }],
   };
 }
 
 describe("backend and consumer transport", () => {
-  it("returns the single versioned login URL with the pinned provider", async () => {
+  it("returns the single login URL with the pinned provider", async () => {
     const original = globalThis.fetch;
     let served;
     globalThis.fetch = async () => ({ ok: true, json: async () => ({ providers: served }) });
@@ -504,7 +406,6 @@ describe("backend and consumer transport", () => {
       });
       for (const change of [
         (p) => (p.id = "other-provider"),
-        (p) => (p.version = "v8"),
         (p) => (p.recipeDigest = "invalid"),
         (p) => delete p.recipeDigest,
         (p) => (p.loginUrl = "https://provider.example/login"),
@@ -540,18 +441,12 @@ describe("backend and consumer transport", () => {
     }
   });
 
-  it("rejects missing and mismatched provider response pins", async () => {
+  it("rejects a response without a provider object", async () => {
     const original = globalThis.fetch;
     try {
-      for (const versionNumber of [undefined, null, "latest", "v8", 7]) {
-        globalThis.fetch = async () => ({
-          ok: true,
-          json: async () => ({ providers: { versionNumber } }),
-        });
-        await assert.rejects(
-          fetchProviderData("provider-one", bound()),
-          /does not match session pin/,
-        );
+      for (const body of [{}, null, { providers: null }, { providers: "provider-one" }]) {
+        globalThis.fetch = async () => ({ ok: true, json: async () => body });
+        await assert.rejects(fetchProviderData("provider-one", bound()), /metadata rejected/);
       }
     } finally {
       globalThis.fetch = original;
@@ -577,10 +472,7 @@ describe("backend and consumer transport", () => {
       const session = bound({ umia });
       await fetchProviderData("provider-one", session);
       await updateSessionStatus(session, "PROOF_GENERATION_STARTED");
-      assert.equal(
-        calls[0].url,
-        `${approved.backendUrl}/api/providers/provider-one?versionNumber=v7`,
-      );
+      assert.equal(calls[0].url, `${approved.backendUrl}/api/providers/provider-one`);
       assert.equal(calls[1].url, `${approved.backendUrl}/api/sdk/update/session/`);
       assert.equal(calls[0].options.headers.Authorization, `Bearer ${umia.sessionToken}`);
       assert.equal(calls[1].options.headers.Authorization, `Bearer ${umia.sessionToken}`);
@@ -592,17 +484,13 @@ describe("backend and consumer transport", () => {
       });
       assert.equal(calls.length, 2);
       const forged = bound({
-        sessionRoute: { ...route(), backendUrl: "https://api.umia.conductor.evil:8443/zktls" },
+        sessionRoute: { ...route(), backendUrl: "https://api.umia.localhost.evil/zktls" },
       });
       await assert.rejects(
         fetchProviderData("provider-one", forged),
         /Unapproved backend destination/,
       );
       assert.equal(calls.length, 2);
-      await assert.rejects(
-        fetchProviderData("provider-one", bound({ umia: { ...umia, providerVersion: "latest" } })),
-        /Exact provider version/,
-      );
       await assert.rejects(fetchProviderData("..", session), /Invalid backend path segment/);
       await assert.rejects(
         fetchProviderData("provider-one", bound({ sessionId: "other-session" })),
@@ -686,9 +574,8 @@ describe("backend and consumer transport", () => {
       };
       await assert.rejects(postTelemetry(bound(), events), /BACKEND_UNREACHABLE/);
 
-      const expired = route();
-      expired.authority.validUntil = "2000-01-01T00:00:00.000Z";
-      const error = await fetchProviderData("provider-one", bound({ sessionRoute: expired })).then(
+      const expired = { ...fixture().umia, expiresAt: "2000-01-01T00:00:00.000Z" };
+      const error = await fetchProviderData("provider-one", bound({ umia: expired })).then(
         () => null,
         (e) => e,
       );
@@ -708,11 +595,8 @@ describe("backend and consumer transport", () => {
     assert.throws(() => formatProof(proof, {}, route()), /witness/);
   });
 
-  it("rejects expired authority, credentials and foreign sessions at lifecycle use", () => {
+  it("rejects expired credentials and foreign sessions at lifecycle use", () => {
     assert.equal(requireLiveSession(bound()).route.backendUrl, approved.backendUrl);
-    const expired = route();
-    expired.authority.validUntil = "2000-01-01T00:00:00.000Z";
-    assert.throws(() => requireLiveSession(bound({ sessionRoute: expired })), /SESSION_EXPIRED/);
     const { umia } = fixture();
     assert.throws(
       () => requireLiveSession(bound({ umia: { ...umia, expiresAt: "2000-01-01T00:00:00.000Z" } })),
@@ -730,14 +614,9 @@ describe("backend and consumer transport", () => {
     const authExpiry = session.umia.attestorAuth.data.expiresAt * 1000;
     assert.equal(
       boundSessionDeadline(session),
-      Math.min(
-        authExpiry,
-        Date.parse(session.umia.expiresAt),
-        Date.parse(session.route.authority.validUntil),
-      ),
+      Math.min(authExpiry, Date.parse(session.umia.expiresAt)),
     );
-    const earlyAuthority = route();
-    earlyAuthority.authority.validUntil = new Date(authExpiry - 1000).toISOString();
-    assert.equal(boundSessionDeadline(bound({ sessionRoute: earlyAuthority })), authExpiry - 1000);
+    const early = { ...session.umia, expiresAt: new Date(authExpiry - 1000).toISOString() };
+    assert.equal(boundSessionDeadline(bound({ umia: early })), authExpiry - 1000);
   });
 });

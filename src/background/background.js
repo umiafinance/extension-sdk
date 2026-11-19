@@ -87,7 +87,7 @@ function reportExtractionFailure(ctx, error, criteria) {
   });
 }
 
-export default function initBackground(runtimeConfig = {}) {
+export default function initBackground() {
   installOffscreenReadyListener();
 
   // Context object to hold shared state and dependencies
@@ -102,11 +102,11 @@ export default function initBackground(runtimeConfig = {}) {
     appId: null,
     sessionId: null,
     sessionEnd: null,
+    // Set by the consumer; called once the active session has ended.
+    onSessionEnd: null,
     session: null,
-    resolveSessionRoute: runtimeConfig.resolveSessionRoute || null,
     publicData: null,
     aborted: false,
-    expectManyClaims: false,
     originalTabId: null,
     initiatingSender: null,
     managedTabs: new Set(),
@@ -170,9 +170,9 @@ export default function initBackground(runtimeConfig = {}) {
   ctx.claimProgress = () => claimProgress(ctx);
   ctx.reportTelemetry = (type) => reportTelemetry(ctx, type);
 
-  // Add processFilteredRequest to context (move from class)
   ctx.processFilteredRequest = async function (request, criteria, sessionId, loginUrl) {
-    // The provider tab keeps polling after a session ends; its cookies and claims are no longer ours to use.
+    // The provider tab keeps polling after a session ends; its cookies and claims are no
+    // longer ours to use.
     if (!ctx.activeSessionId || ctx.aborted) return { success: false, error: "CANCELLED" };
     try {
       sessionId = ctx.sessionId || sessionId;
@@ -260,10 +260,6 @@ export default function initBackground(runtimeConfig = {}) {
         // failure — the page usually just hasn't rendered the data yet. Report
         // it as retryable so the content script keeps polling, and leave the
         // session (and the popup) alone.
-        //
-        // This path exists because the authoritative xPath/jsonPath resolution
-        // moved here from the content-script gate; before, a non-matching
-        // response was simply never forwarded.
         if (error?.retryable) {
           reportExtractionFailure(ctx, error, criteria);
           return { success: false, retryable: true, error: error.message };

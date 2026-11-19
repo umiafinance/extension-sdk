@@ -16,18 +16,16 @@ export function freezeUmia(umia) {
 
 export function freezeSessionRoute(route) {
   const copy = structuredClone(route);
-  Object.freeze(copy.authority.witnesses);
-  Object.freeze(copy.authority);
   Object.freeze(copy.network);
   return Object.freeze(copy);
 }
 
-// Destinations and authority live only on the route; the bound umia keeps session credentials.
+// Destinations and network live only on the route; the bound umia keeps session credentials.
 export function freezeBoundSession({ sessionId, umia, route }) {
-  const { providerVersion, sessionToken, attestorAuth, expiresAt } = umia;
+  const { sessionToken, attestorAuth, expiresAt } = umia;
   return Object.freeze({
     sessionId,
-    umia: freezeUmia({ providerVersion, sessionToken, attestorAuth, expiresAt }),
+    umia: freezeUmia({ sessionToken, attestorAuth, expiresAt }),
     route: freezeSessionRoute(route),
   });
 }
@@ -45,15 +43,14 @@ export function verificationTemplate(request) {
     redirectUrl: request.redirectUrl || "",
     acceptAiProviders: !!request.acceptAiProviders,
     sdkVersion: request.sdkVersion,
-    providerVersion: request.providerVersion || "",
-    resolvedProviderVersion: request.resolvedProviderVersion || "",
     jsonProofResponse: !!request.jsonProofResponse,
     umia: copyUmia(request.umia),
   };
 }
 
+// `profiles` carries the background's approved endpoint profiles, so offscreen narrows its own copy.
 export function takeOffscreenSession(messageData) {
-  const { session, ...claim } = messageData ?? {};
+  const { session, profiles, ...claim } = messageData ?? {};
   if (!session?.sessionId || !session?.umia || !session?.route) {
     throw new Error("Bound offscreen session is required");
   }
@@ -63,6 +60,7 @@ export function takeOffscreenSession(messageData) {
   }
   return {
     session: bound,
+    profiles,
     // A caller cannot smuggle its own attestor authentication into the dial.
     claim: { ...claim, client: { url: bound.route.attestorUrl } },
   };

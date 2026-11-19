@@ -87,7 +87,7 @@ test("one queued proof records exactly one proof_started", async () => {
     proofGenerationQueue: [{ claimData: { session }, requestHash: "0xabc" }],
     generatedProofs: new Map(),
     providerData: { requestData: [{ requestHash: "0xabc" }] },
-    expectManyClaims: true,
+    submitProofs: async () => {},
     MESSAGE_ACTIONS: {},
     MESSAGE_SOURCES: {},
     EVENT_TYPES: {},

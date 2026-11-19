@@ -3,8 +3,9 @@ import { readFileSync } from "node:fs";
 import { test } from "bun:test";
 import {
   MAX_REPLAYS_PER_SESSION,
-  runBoundInjection,
+  REQUEST_CHAIN_OP,
   runBoundReplay,
+  runBoundRequestChain,
 } from "../src/background/injectionManager.js";
 import { MESSAGE_ACTIONS, MESSAGE_SOURCES } from "../src/utils/constants/interfaces.js";
 
@@ -61,18 +62,16 @@ function fixture({ url = documentUrl, href = url, requestData, interceptor } = {
   const session = {
     sessionId: "bound-one",
     umia: {
-      providerVersion: "v7",
       sessionToken: "private-bearer",
       expiresAt: new Date((now + 600) * 1000).toISOString(),
       attestorAuth: {
         data: { id: "bound-one", expiresAt: now + 300, hostWhitelist: ["provider.example"] },
       },
     },
-    route: { authority: { validUntil: new Date((now + 600) * 1000).toISOString() } },
+    route: { network: { environment: "devnet", chainId: 10143 } },
   };
   const providerData = {
     id: "approved-provider",
-    version: "v7",
     requestData: requestData ?? [
       {
         url: documentUrl,
@@ -128,7 +127,7 @@ test("replays the bound tab's declared document once, as one credentialed GET wi
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].target, { tabId: 91, documentIds: [documentId] });
   assert.equal(calls[0].world, "MAIN");
-  assert.deepEqual(calls[0].args, [documentUrl]);
+  assert.deepEqual(calls[0].args, [documentUrl, []]);
   assert.equal(sent.length, 1);
   assert.deepEqual(
     { method: sent[0].method, url: sent[0].url, async: sent[0].async },
@@ -312,6 +311,119 @@ test("caps replays per session across documents and URLs", async () => {
   assert.equal(calls.length, MAX_REPLAYS_PER_SESSION);
 });
 
+const activityUrl = `${origin}/pulls/search?q=is%3Apr%20author%3A%40me`;
+const declared = (url, changes = {}) => ({
+  url,
+  urlType: "TEMPLATE",
+  method: "GET",
+  bodySniff: { enabled: false, template: "" },
+  ...changes,
+});
+const connected = (options = {}) =>
+  fixture({ requestData: [declared(documentUrl), declared(activityUrl)], ...options });
+
+test("replays the recipe's other fixed same-origin GETs with the signed-in document, once each", async () => {
+  const { ctx, sender, calls, sent } = connected();
+  assert.deepEqual(await runBoundReplay(ctx, sender, replay), {
+    success: true,
+    status: "executed",
+  });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, [documentUrl, [activityUrl]]);
+  assert.deepEqual(
+    sent.map((xhr) => [xhr.method, xhr.url, xhr.async, xhr.withCredentials, xhr.sentBody]),
+    [
+      ["GET", documentUrl, true, true, null],
+      ["GET", activityUrl, true, true, null],
+    ],
+  );
+  assert.deepEqual(sent[1].headers, sent[0].headers);
+
+  assert.deepEqual(await runBoundReplay(ctx, sender, replay), {
+    success: true,
+    status: "duplicate",
+  });
+  assert.equal(calls.length, 1);
+});
+
+test("a companion is only a fixed-URL plain GET of the recipe on the document's own origin", async () => {
+  const fixed = `${origin}/fixed`;
+  const { ctx, sender, calls } = fixture({
+    requestData: [
+      declared(documentUrl),
+      declared(activityUrl),
+      declared(fixed, { urlType: "CONSTANT" }),
+      declared(activityUrl),
+      declared(`${origin}/u/{{handle}}`),
+      declared(`${origin}/p/{{id_SECRET}}/x`, { urlType: "CONSTANT" }),
+      declared("https://provider\\.example/a/[0-9]+", { urlType: "REGEX" }),
+      declared(`${origin}/looks-fixed`, { urlType: "REGEX" }),
+      declared(`${origin}/api/me`, { method: "POST" }),
+      declared(`${origin}/graphql`, { bodySniff: { enabled: true, template: "x" } }),
+      declared("https://other.example/activity"),
+      declared("https://provider.example:8443/activity"),
+      declared("http://provider.example/activity"),
+      declared("https://user:pass@provider.example/activity"),
+    ],
+  });
+  ctx.providerData.allowedInjectedRequestData = [declared(`${origin}/injected`)];
+  // Signed but cross-origin: still not a companion.
+  ctx.session.umia.attestorAuth.data.hostWhitelist.push("other.example");
+  await runBoundReplay(ctx, sender, replay);
+  assert.deepEqual(calls[0].args, [documentUrl, [activityUrl, fixed]]);
+});
+
+test("replays companions only from a page the recipe declares, never from sign-in", async () => {
+  const { ctx, sender, calls } = connected({ url: `${origin}/login?return_to=%2Fsettings` });
+  assert.equal((await runBoundReplay(ctx, sender, replay)).success, false);
+  assert.equal(calls.length, 0);
+
+  const fromActivity = connected({ url: activityUrl });
+  await runBoundReplay(fromActivity.ctx, fromActivity.sender, replay);
+  assert.deepEqual(fromActivity.calls[0].args, [activityUrl, [documentUrl]]);
+});
+
+test("a document never re-requests a companion when it later moves to that URL", async () => {
+  const { ctx, sender, calls, tab } = connected();
+  await runBoundReplay(ctx, sender, replay);
+  sender.url = activityUrl;
+  tab.url = activityUrl;
+  assert.deepEqual(await runBoundReplay(ctx, sender, replay), {
+    success: true,
+    status: "duplicate",
+  });
+  assert.equal(calls.length, 1);
+});
+
+test("caps a connected recipe at three replays of each declared GET per session", async () => {
+  const { ctx, sender, sent } = connected();
+  for (let i = 0; i < MAX_REPLAYS_PER_SESSION; i += 1) {
+    sender.documentId = `document-${i}`;
+    assert.equal((await runBoundReplay(ctx, sender, replay)).status, "executed", String(i));
+  }
+  sender.documentId = "one-too-many";
+  assert.equal((await runBoundReplay(ctx, sender, replay)).success, false);
+  assert.equal(sent.length, 2 * MAX_REPLAYS_PER_SESSION);
+});
+
+test("a round that sent nothing releases every URL; an uncertain one rejects them all", async () => {
+  const waiting = connected({ interceptor: false });
+  assert.deepEqual(await runBoundReplay(waiting.ctx, waiting.sender, replay), {
+    success: false,
+    status: "not-ready",
+  });
+  assert.equal(waiting.ctx.injectionOperations.size, 0);
+  assert.equal(waiting.sent.length, 0);
+
+  const { ctx, sender } = connected();
+  chrome.scripting.executeScript = async () => {
+    throw new Error("frame removed");
+  };
+  assert.equal((await runBoundReplay(ctx, sender, replay)).success, false);
+  assert.deepEqual([...ctx.injectionOperations.values()], ["rejected", "rejected"]);
+  assert.equal((await runBoundReplay(ctx, sender, replay)).success, false);
+});
+
 test("sends nothing when the page moved or the interceptor is not ready, and may retry", async () => {
   for (const options of [{ href: `${origin}/settings/admin` }, { interceptor: false }]) {
     const { ctx, sender, calls, sent } = fixture(options);
@@ -335,17 +447,17 @@ test("an uncertain injection outcome is never retried", async () => {
   assert.equal(calls.length, 1);
 });
 
-test("replay and custom injection never accept each other's operation", async () => {
+test("replay and request chain never accept each other's operation", async () => {
   const { ctx, sender, calls } = fixture();
-  assert.equal((await runBoundInjection(ctx, sender, replay)).success, false);
-  assert.equal((await runBoundReplay(ctx, sender, { op: "RUN_CUSTOM_INJECTION" })).success, false);
+  assert.equal((await runBoundRequestChain(ctx, sender, replay)).success, false);
+  assert.equal((await runBoundReplay(ctx, sender, { op: REQUEST_CHAIN_OP })).success, false);
   assert.equal(calls.length, 0);
 });
 
 test("the router sends the replay op to the bound replay and nothing else to it", async () => {
   for (const [data, executed] of [
     [replay, 1],
-    [{ op: "RUN_CUSTOM_INJECTION" }, 0],
+    [{ op: REQUEST_CHAIN_OP }, 0],
   ]) {
     const { ctx, sender, calls } = fixture();
     let response;

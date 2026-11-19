@@ -1,4 +1,4 @@
-import { ZKTLS_ERROR_CODES } from "@umia/types/zktls-self-host";
+import { ZKTLS_ERROR_CODES } from "@umia/zktls-config/self-host";
 
 /**
  * @typedef {Object} TemplateData
@@ -24,15 +24,9 @@ export const RECLAIM_SDK_ACTIONS = {
   VERIFICATION_COMPLETED: "RECLAIM_VERIFICATION_COMPLETED",
   VERIFICATION_FAILED: "RECLAIM_VERIFICATION_FAILED",
   CANCEL_VERIFICATION: "RECLAIM_CANCEL_VERIFICATION",
-  SET_PUBLIC_DATA: "RECLAIM_SET_PUBLIC_DATA",
-  PARAMETERS_UPDATE: "RECLAIM_PARAMETERS_UPDATE",
-  PARAMETERS_GET: "RECLAIM_PARAMETERS_GET",
-  REPORT_PROVIDER_ERROR: "RECLAIM_REPORT_PROVIDER_ERROR",
-  SET_EXPECT_MANY_CLAIMS: "RECLAIM_SET_EXPECT_MANY_CLAIMS",
-  REQUEST_CLAIM: "RECLAIM_REQUEST_CLAIM",
-  // MAIN-world → content-script log relay. The interceptor and the injection
-  // scripts run in the page's own world with no `chrome.runtime`, so this is
-  // the only way their diagnostics reach the hub. See LOG_BRIDGE in
+  // MAIN-world → content-script log relay. The interceptor runs in the page's
+  // own world with no `chrome.runtime`, so this is the only way its diagnostics
+  // reach the hub. See LOG_BRIDGE in
   // src/interceptor/log-bridge.js.
   LOG: "RECLAIM_LOG",
   // Content script → MAIN world: pushes the log config down, since the page
@@ -73,6 +67,7 @@ export const MESSAGE_ACTIONS = {
   PROOF_GENERATION_FAILED: "PROOF_GENERATION_FAILED",
   PROOF_SUBMITTED: "PROOF_SUBMITTED",
   PROOF_SUBMISSION_FAILED: "PROOF_SUBMISSION_FAILED",
+  PROVIDER_TAB_VERIFIED: "PROVIDER_TAB_VERIFIED",
   GENERATE_PROOF: "GENERATE_PROOF",
   GENERATED_PROOF_RESPONSE: "GENERATED_PROOF_RESPONSE",
   GENERATE_CLAIM_ON_ATTESTOR: "GENERATE_CLAIM_ON_ATTESTOR",
@@ -104,13 +99,6 @@ export const MESSAGE_ACTIONS = {
   INTERCEPTED_REQUEST_AND_RESPONSE: "INTERCEPTED_REQUEST_AND_RESPONSE",
 
   // Injection script actions
-  UPDATE_PUBLIC_DATA: "UPDATE_PUBLIC_DATA",
-  UPDATE_EXPECT_MANY_CLAIMS: "UPDATE_EXPECT_MANY_CLAIMS",
-  GET_PARAMETERS: "GET_PARAMETERS",
-  REPORT_PROVIDER_ERROR: "REPORT_PROVIDER_ERROR",
-  REQUEST_CLAIM: "REQUEST_CLAIM",
-
-  // Injection script actions
   INJECT_VIA_SCRIPTING: "INJECT_VIA_SCRIPTING",
 
   // Logging actions
@@ -125,7 +113,6 @@ export const MESSAGE_ACTIONS = {
  * @property {string} description - Provider description
  * @property {string} logoUrl - URL to provider logo
  * @property {string} loginUrl - URL to provider login page
- * @property {string} customInjection - Custom injection code
  * @property {boolean} isApproved - Whether provider is approved
  * @property {string} geoLocation - Geo location
  * @property {string} providerType - Provider type

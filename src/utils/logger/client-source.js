@@ -23,9 +23,9 @@
  *    earliest logs of a session, the ones that explain a startup failure,
  *    stamped with a placeholder.
  *
- * The team's identification rule is a substring check, and every string this
- * module can produce contains `browser-extension-sdk` — including the
- * degraded-environment fallbacks.
+ * Identification is a substring check, and every string this module can
+ * produce contains `browser-extension-sdk`, including the degraded-environment
+ * fallbacks.
  */
 
 export const SDK_NAME = "browser-extension-sdk";
@@ -173,8 +173,8 @@ export function resetClientSourceCache() {
  * Merge the `reclaim-api-client` header into a headers object.
  *
  * Every outbound request from the SDK goes through this so extension traffic is
- * attributable server-side. Note this is identification only: per the team's
- * guideline the extension contributes no device information to analytics.
+ * attributable server-side. It is identification only: the extension
+ * contributes no device information.
  *
  * @param {Object} [headers]
  * @returns {Object}

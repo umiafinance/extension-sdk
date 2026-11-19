@@ -148,6 +148,7 @@ async function finishSession(ctx, end, { code, action, requestHash, tabReturnMs,
       }
       ctx.activeSessionId = null;
       ctx.initiatingSender = null;
+      ctx.onSessionEnd?.();
     }
   }
 }
@@ -399,17 +400,20 @@ export function missingRequestCode(ctx) {
     : "REQUEST_NOT_CAPTURED";
 }
 
-/** The background owns the decision window so page reloads cannot restart it. */
-export function recordResponseMatchResult(ctx, requestHash, failed) {
+/**
+ * A conclusive miss ends the session now: the account is signed in and below the
+ * threshold, so the session timer could only delay the same answer. A claim already
+ * in flight for that entry keeps its chance; the miss stays recorded for the timer.
+ */
+export async function recordResponseMatchResult(ctx, requestHash, failed) {
   const failures = ctx.responseMatchFailures;
-  if (failed && !ctx.generatedProofs.has(requestHash)) {
-    const firstFailure = failures.size === 0;
-    failures.add(requestHash);
-    if (firstFailure && !ctx.firstRequestReceived) ctx.sessionTimerManager.startSessionTimer();
+  if (!failed || ctx.generatedProofs.has(requestHash)) {
+    failures.delete(requestHash);
     return;
   }
-  failures.delete(requestHash);
-  if (failures.size === 0 && !ctx.firstRequestReceived) ctx.sessionTimerManager.clearSessionTimer();
+  failures.add(requestHash);
+  if (ctx.filteredRequests?.has(requestHash)) return;
+  await failSession(ctx, "CRITERIA_NOT_MET", requestHash, EVENT_TYPES.NO_RESPONSE_MATCH_WARNING);
 }
 
 function formatBoundProofs(ctx, route) {
@@ -439,9 +443,6 @@ function formatBoundProofs(ctx, route) {
 }
 
 export async function submitProofs(ctx) {
-  // Hold if user set canExpectManyClaims(true)
-  if (ctx.expectManyClaims) return;
-
   const boundSession = ctx.session;
   const sessionId = ctx.sessionId;
   if (
@@ -491,6 +492,22 @@ export async function submitProofs(ctx) {
       submitted: true,
       sessionId,
     });
+    // The widget shows its success state from a separate, data-free action: content relays a
+    // PROOF_SUBMITTED payload to its page, and the provider page must never see the proofs.
+    if (end.providerTabId) {
+      chrome.tabs
+        .sendMessage(
+          end.providerTabId,
+          {
+            action: ctx.MESSAGE_ACTIONS.PROVIDER_TAB_VERIFIED,
+            source: ctx.MESSAGE_SOURCES.BACKGROUND,
+            target: ctx.MESSAGE_SOURCES.CONTENT_SCRIPT,
+            data: {},
+          },
+          { frameId: 0 },
+        )
+        .catch(() => {});
+    }
   } catch (error) {
     loggingHub.error("[BACKGROUND] Error submitting proof", "background.proof");
     // A trigger recorded meanwhile (tab closed, expiry, cancel) explains the failure better

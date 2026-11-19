@@ -1,20 +1,17 @@
 import { requireLiveSession } from "../utils/session-config";
 import { normalizeUrlType, URL_TYPES } from "../utils/provider-normalization";
 import { templateVariables } from "../utils/claim-creator/network-filter";
+import { parseZktlsRequestChain } from "@umia/zktls-config/request-chain";
 
 export const REPLAY_OP = "REPLAY_BOUND_DOCUMENT";
-// Replays per session, so a page cycling its URL cannot turn replay into a request loop.
+export const REQUEST_CHAIN_OP = "RUN_REQUEST_CHAIN";
+// Replays per session for each plain GET the recipe declares, so a cycling page cannot loop them.
 export const MAX_REPLAYS_PER_SESSION = 3;
 const REPLAY_KEY = "replay|";
 
-const SHA256 = /^sha256:[0-9a-f]{64}$/;
-
-// Content needs the provider's request rules, but executable code stays in the
-// background with the authenticated, version-pinned registry response.
 export function publicProviderData(ctx) {
   if (!ctx.providerData) return ctx.providerData;
-  const { customInjection, customInjectionSha256, ...publicData } = ctx.providerData;
-  return { ...publicData, loginUrl: ctx.providerLoginUrl };
+  return { ...ctx.providerData, loginUrl: ctx.providerLoginUrl };
 }
 
 function current(ctx, bound) {
@@ -41,14 +38,6 @@ function originOf(value) {
   } catch {
     return null;
   }
-}
-
-async function injectionDigest(code) {
-  const bytes = new TextEncoder().encode(code);
-  const hash = await crypto.subtle.digest("SHA-256", bytes);
-  return `sha256:${Array.from(new Uint8Array(hash), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("")}`;
 }
 
 // An operation request is never an input channel for code, a provider, a
@@ -101,8 +90,8 @@ function liveBoundSender(ctx, sender) {
   return { ...bound, expectedOrigin };
 }
 
-export async function runBoundInjection(ctx, sender, data) {
-  if (!isOperation(data, "RUN_CUSTOM_INJECTION")) {
+export async function runBoundRequestChain(ctx, sender, data) {
+  if (!isOperation(data, REQUEST_CHAIN_OP)) {
     return { success: false, error: "INJECTION_REJECTED" };
   }
 
@@ -111,12 +100,15 @@ export async function runBoundInjection(ctx, sender, data) {
   const { tabId, documentId, provider, operations, expectedOrigin } = bound;
 
   try {
-    const code = provider.customInjection;
-    const digest = provider.customInjectionSha256;
-    if ((code === undefined || code === null || code === "") && !digest) {
-      return { success: true, status: "skipped" };
-    }
-    if (typeof code !== "string" || !code || !SHA256.test(digest || "")) {
+    if (provider.requestChain === undefined) return { success: true, status: "skipped" };
+    const chain = parseZktlsRequestChain(provider.requestChain, provider.requestData);
+    if (!chain) return { success: false, error: "INJECTION_REJECTED" };
+    const urls = provider.requestData.map((request) => request.url);
+    const hosts = bound.session.umia.attestorAuth.data.hostWhitelist;
+    if (
+      !Array.isArray(hosts) ||
+      [chain.readyUrl, ...urls].some((url) => !hosts.includes(new URL(url).hostname))
+    ) {
       return { success: false, error: "INJECTION_REJECTED" };
     }
 
@@ -126,13 +118,8 @@ export async function runBoundInjection(ctx, sender, data) {
         : { success: false, error: "INJECTION_REJECTED" };
     }
     // Reserve before the first await. An uncertain executeScript outcome must
-    // never re-run provider code in the same session/document.
+    // never re-run the chain in the same session/document.
     operations.set(documentId, "pending");
-
-    if ((await injectionDigest(code)) !== digest || !current(ctx, bound)) {
-      operations.set(documentId, "rejected");
-      return { success: false, error: "INJECTION_REJECTED" };
-    }
 
     const tab = await chrome.tabs.get(tabId);
     if (originOf(tab?.url) !== expectedOrigin || !current(ctx, bound)) {
@@ -143,16 +130,80 @@ export async function runBoundInjection(ctx, sender, data) {
     const results = await chrome.scripting.executeScript({
       target: { tabId, documentIds: [documentId] },
       world: "MAIN",
-      func: (approvedCode) => {
-        try {
-          (0, eval)(approvedCode);
-          return { status: "executed" };
-        } catch {
-          // Page exception text may include private page data.
-          return { status: "error" };
+      func: (requestChain, requestUrls, deadline) => {
+        // Declarative fetches work under page CSP without eval or generated functions.
+        // Keep this function self-contained: Chrome serializes it outside the bundle.
+        var parameters = Object.create(null);
+        function live() {
+          return Date.now() < deadline;
         }
+        function get(url) {
+          return fetch(url, { credentials: "include", cache: "no-store", redirect: "error" });
+        }
+        function next(index) {
+          if (!live() || index >= requestUrls.length) return;
+          var url = requestUrls[index].replace(/\{\{(\w+)\}\}/g, function (_, key) {
+            if (!Object.prototype.hasOwnProperty.call(parameters, key))
+              throw new Error("Missing request parameter");
+            return encodeURIComponent(parameters[key]);
+          });
+          return get(url).then(function (response) {
+            if (!response.ok) return;
+            var captures = requestChain.responseParameters.filter(function (item) {
+              return item.requestIndex === index;
+            });
+            if (!captures.length) return next(index + 1);
+            return response.json().then(function (json) {
+              captures.forEach(function (capture) {
+                var value = json;
+                capture.path.forEach(function (key) {
+                  value =
+                    value && Object.prototype.hasOwnProperty.call(value, key)
+                      ? value[key]
+                      : undefined;
+                });
+                if (typeof value !== "string" || !value || value.length > 256)
+                  throw new Error("Invalid request parameter");
+                var part = capture.slice
+                  ? value.slice(capture.slice[0], capture.slice[1])
+                  : value;
+                if (!part) throw new Error("Invalid request parameter");
+                parameters[capture.parameter] = part;
+              });
+              return next(index + 1);
+            });
+          });
+        }
+        function poll() {
+          if (!live()) return;
+          get(requestChain.readyUrl).then(
+            function (response) {
+              if (response.status === 200) {
+                Promise.resolve()
+                  .then(function () {
+                    return next(0);
+                  })
+                  .catch(function () {});
+                return;
+              }
+              if (live()) setTimeout(poll, 2000);
+            },
+            function () {
+              if (live()) setTimeout(poll, 2000);
+            },
+          );
+        }
+        poll();
+        return { status: "executed" };
       },
-      args: [code],
+      args: [
+        chain,
+        urls,
+        Math.min(
+          Date.parse(bound.session.umia.expiresAt),
+          bound.session.umia.attestorAuth.data.expiresAt * 1000,
+        ),
+      ],
     });
 
     if (!current(ctx, bound)) {
@@ -206,23 +257,39 @@ function declaresUrl(request, url) {
   }
 }
 
+const isPlainGet = (request) =>
+  String(request?.method).toUpperCase() === "GET" && !request.bodySniff?.enabled;
+
+const plainGets = (provider) =>
+  Array.isArray(provider.requestData) ? provider.requestData.filter(isPlainGet) : [];
+
 // A replay re-issues only a document request the pinned recipe declares as a plain GET.
 function replayableUrl(provider, url) {
-  return (
-    Array.isArray(provider.requestData) &&
-    provider.requestData.some(
+  return plainGets(provider).some((request) => declaresUrl(request, url));
+}
+
+// The recipe's other fixed-URL GETs on this origin, so one signed-in page yields every proof.
+function companionUrls(provider, url) {
+  const origin = originOf(url);
+  if (!origin) return [];
+  const urls = plainGets(provider)
+    .filter(
       (request) =>
-        String(request?.method).toUpperCase() === "GET" &&
-        !request.bodySniff?.enabled &&
-        declaresUrl(request, url),
+        typeof request.url === "string" &&
+        !request.url.includes("{{") &&
+        normalizeUrlType(request.urlType, request.url) !== URL_TYPES.REGEX &&
+        originOf(request.url) === origin &&
+        request.url !== url,
     )
-  );
+    .map((request) => request.url);
+  return [...new Set(urls)];
 }
 
 /**
  * Re-requests the bound provider tab's own document as a credentialed same-origin XHR,
- * which the page-world interceptor captures like any page request. The URL comes from
- * the browser's tab record, never from the message.
+ * which the page-world interceptor captures like any page request, together with the
+ * recipe's other fixed-URL GETs on that origin. URLs come from the browser's tab record
+ * and the pinned recipe, never from the message.
  */
 export async function runBoundReplay(ctx, sender, data) {
   if (!isOperation(data, REPLAY_OP)) return { success: false, error: "REPLAY_REJECTED" };
@@ -231,7 +298,8 @@ export async function runBoundReplay(ctx, sender, data) {
   if (!bound) return { success: false, error: "REPLAY_REJECTED" };
   const { tabId, documentId, session, provider, operations } = bound;
 
-  let key;
+  let keys = [];
+  const mark = (status) => keys.forEach((key) => operations.set(key, status));
   try {
     // Upstream's default: only an explicit opt-out disables replay.
     if (provider.disableRequestReplay === true) {
@@ -251,40 +319,49 @@ export async function runBoundReplay(ctx, sender, data) {
       return { success: false, error: "REPLAY_REJECTED" };
     }
 
-    key = `${REPLAY_KEY}${documentId}|${url}`;
-    if (operations.has(key)) {
-      return operations.get(key) === "executed"
+    const keyOf = (target) => `${REPLAY_KEY}${documentId}|${target}`;
+    if (operations.has(keyOf(url))) {
+      return operations.get(keyOf(url)) === "executed"
         ? { success: true, status: "duplicate" }
         : { success: false, error: "REPLAY_REJECTED" };
     }
+    const companions = companionUrls(provider, url).filter(
+      (target) => !operations.has(keyOf(target)),
+    );
     const replays = [...operations.keys()].filter((k) => k.startsWith(REPLAY_KEY)).length;
-    if (replays >= MAX_REPLAYS_PER_SESSION) return { success: false, error: "REPLAY_REJECTED" };
-    // Reserve before the next await: an uncertain outcome must never send the request twice.
-    operations.set(key, "pending");
+    if (replays + 1 + companions.length > MAX_REPLAYS_PER_SESSION * plainGets(provider).length) {
+      return { success: false, error: "REPLAY_REJECTED" };
+    }
+    // Reserve before the next await: an uncertain outcome must never send a request twice.
+    keys = [url, ...companions].map(keyOf);
+    mark("pending");
 
     const results = await chrome.scripting.executeScript({
       target: { tabId, documentIds: [documentId] },
       world: "MAIN",
-      func: (approvedUrl) => {
+      func: (approvedUrl, otherUrls) => {
         if (window.location.href !== approvedUrl) return { status: "moved" };
         if (!window.reclaimInterceptor) return { status: "not-ready" };
         try {
-          const xhr = new XMLHttpRequest();
-          xhr.open("GET", approvedUrl, true);
-          xhr.withCredentials = true;
-          xhr.setRequestHeader(
-            "accept",
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-          );
-          xhr.setRequestHeader("accept-language", "en-GB,en;q=0.5");
-          xhr.setRequestHeader("cache-control", "no-store");
-          xhr.send(null);
+          // This runs in the page without the bundle's Babel helpers: no spread or for...of.
+          [approvedUrl].concat(otherUrls).forEach((target) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("GET", target, true);
+            xhr.withCredentials = true;
+            xhr.setRequestHeader(
+              "accept",
+              "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            );
+            xhr.setRequestHeader("accept-language", "en-GB,en;q=0.5");
+            xhr.setRequestHeader("cache-control", "no-store");
+            xhr.send(null);
+          });
           return { status: "sent" };
         } catch {
           return { status: "error" };
         }
       },
-      args: [url],
+      args: [url, companions],
     });
 
     const result = results?.[0];
@@ -292,21 +369,23 @@ export async function runBoundReplay(ctx, sender, data) {
       results?.length === 1 && result.documentId === documentId && result.frameId === 0
         ? result.result?.status
         : undefined;
-    // Nothing was sent, so a later trigger may try this document and URL again.
+    // Nothing was sent, so a later trigger may try this document and these URLs again.
     if (status === "moved" || status === "not-ready") {
-      operations.delete(key);
+      keys.forEach((key) => operations.delete(key));
       return { success: false, status };
     }
     if (status !== "sent") {
-      operations.set(key, "rejected");
+      mark("rejected");
       return { success: false, error: "REPLAY_REJECTED" };
     }
-    operations.set(key, "executed");
+    mark("executed");
     return current(ctx, bound)
       ? { success: true, status: "executed" }
       : { success: false, error: "CANCELLED" };
   } catch {
-    if (key && operations.get(key) === "pending") operations.set(key, "rejected");
+    for (const key of keys) {
+      if (operations.get(key) === "pending") operations.set(key, "rejected");
+    }
     return { success: false, error: "REPLAY_REJECTED" };
   }
 }

@@ -75,8 +75,7 @@ export function assertClaimShape(params, secretParams, loggingHub) {
       );
     }
 
-    // Schema types paramValues as string→string. A customInjection can put a
-    // number or boolean here via window.Reclaim, which AJV rejects.
+    // Schema types paramValues as string→string, which AJV enforces.
     if (target.paramValues) {
       for (const [key, value] of Object.entries(target.paramValues)) {
         if (typeof value !== "string") {

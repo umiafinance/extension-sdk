@@ -10,9 +10,9 @@
  * this context's console. ONE threshold, `config.logLevel`, decides both what is
  * emitted and in what form:
  *
- *   INFO (default) — payloads REDACTED: values blanked, key names kept.
- *   FINE           — payloads RAW except credentials: response bodies,
- *                    extracted parameters and the proof. Local debugging only.
+ *   INFO (default): payloads REDACTED, values blanked, key names kept.
+ *   FINE: payloads RAW except credentials (response bodies, extracted
+ *         parameters and the proof). Local debugging only.
  *
  * Session telemetry is separate and finite; see background/telemetry.js.
  */
@@ -179,9 +179,8 @@ class LoggingHub {
         : resolvedLevel === "WARNING"
           ? console.warn
           : console.log;
-    // Literal format string, `message` passed as an argument — see the note
-    // in log-bridge.js. A message carrying "%s" otherwise consumes the
-    // payload and corrupts the line.
+    // Literal format string with `message` as an argument (see log-bridge.js):
+    // a message carrying "%s" would otherwise consume the payload.
     const format = type ? "[%s] [%s] [%s] %s" : "[%s] [%s] %s";
     const parts = type
       ? [resolvedLevel, context, type, message]

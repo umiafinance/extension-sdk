@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "bun:test";
-import { ZKTLS_ERROR_CODES, ZKTLS_EXTENSION_ORIGIN_ALLOWLIST } from "@umia/types/zktls-self-host";
+import { ZKTLS_ERROR_CODES, ZKTLS_EXTENSION_ORIGIN_ALLOWLIST } from "@umia/zktls-config/self-host";
 import {
   MESSAGE_ACTIONS,
   MESSAGE_SOURCES,
@@ -16,17 +16,13 @@ const route = {
   callerOrigin: profile.callerOrigin,
   backendUrl: profile.backendUrl,
   attestorUrl: profile.attestorUrl,
-  authority: {
-    digest: `sha256:${"c".repeat(64)}`,
-    validUntil: new Date((now + 600) * 1000).toISOString(),
-  },
+  network: { environment: "devnet", chainId: 10143, authorityDigest: `sha256:${"c".repeat(64)}` },
 };
 function bound(id) {
   return {
     sessionId: id,
     route,
     umia: {
-      providerVersion: "v1",
       sessionToken: "a".repeat(64),
       expiresAt: new Date((now + 600) * 1000).toISOString(),
       attestorAuth: {
@@ -62,7 +58,7 @@ function initiatingSender(id) {
     sessionId: id,
     tabId: 42,
     extensionId: "test-extension",
-    documentId: "hub-document",
+    documentId: "caller-document",
     profile: profile.profile,
   };
 }
@@ -70,7 +66,7 @@ const sender = {
   id: "test-extension",
   tab: { id: 42 },
   frameId: 0,
-  documentId: "hub-document",
+  documentId: "caller-document",
   url: `${profile.callerOrigin}/auction/1`,
   origin: profile.callerOrigin,
 };
@@ -119,8 +115,8 @@ test("only the initiating top-frame document can cancel its bound session", asyn
       "private-one",
       {
         ...sender,
-        url: "https://admin.umia.conductor:8443/",
-        origin: "https://admin.umia.conductor:8443",
+        url: "https://other.example/",
+        origin: "https://other.example",
       },
     ],
   ]) {
@@ -163,17 +159,16 @@ test("a rejected start reaches its caller document only as a finite code", async
   const baseOnDevnet = {
     environment: "devnet",
     chainId: 84532,
-    attestorUrl: profile.attestorUrl,
-    witnesses: [`0x${"a".repeat(40)}`],
-    minimumWitnesses: 1,
-    validUntil: new Date((now + 600) * 1000).toISOString(),
+    beaconAddress: `0x${"b".repeat(40)}`,
+    expectedEpoch: 2,
+    authorityDigest: `sha256:${"c".repeat(64)}`,
   };
   try {
-    for (const [resolved, code] of [
-      [null, "CONFIG_REJECTED"],
-      [{ profile: profile.profile, authority: baseOnDevnet }, "UNSUPPORTED_NETWORK"],
+    for (const [umia, code] of [
+      [{}, "CONFIG_REJECTED"],
+      [{ backendUrl: profile.backendUrl, network: baseOnDevnet }, "UNSUPPORTED_NETWORK"],
     ]) {
-      const ctx = { MESSAGE_ACTIONS, MESSAGE_SOURCES, resolveSessionRoute: async () => resolved };
+      const ctx = { MESSAGE_ACTIONS, MESSAGE_SOURCES };
       let response;
       await handleMessage(
         ctx,
@@ -181,7 +176,11 @@ test("a rejected start reaches its caller document only as a finite code", async
           action: MESSAGE_ACTIONS.START_VERIFICATION,
           source: MESSAGE_SOURCES.CONTENT_SCRIPT,
           target: MESSAGE_SOURCES.BACKGROUND,
-          data: { sessionId: "rejected-one", providerId: "provider-one", umia: {} },
+          data: {
+            sessionId: "rejected-one",
+            providerId: "provider-one",
+            umia,
+          },
         },
         sender,
         (value) => (response = value),
@@ -196,7 +195,7 @@ test("a rejected start reaches its caller document only as a finite code", async
             target: MESSAGE_SOURCES.CONTENT_SCRIPT,
             data: { error: code, sessionId: "rejected-one" },
           },
-          options: { frameId: 0, documentId: "hub-document" },
+          options: { frameId: 0, documentId: "caller-document" },
         },
       ]);
     }
@@ -209,16 +208,11 @@ test("a duplicate start from the initiating document leaves the live proof alone
   const sent = [];
   const originalSend = chrome.tabs.sendMessage;
   chrome.tabs.sendMessage = async (...args) => sent.push(args);
-  let resolved = 0;
   const ctx = {
     MESSAGE_ACTIONS,
     MESSAGE_SOURCES,
     activeSessionId: "private-one",
     initiatingSender: initiatingSender("private-one"),
-    resolveSessionRoute: async () => {
-      resolved += 1;
-      return null;
-    },
   };
   try {
     let response;
@@ -234,7 +228,6 @@ test("a duplicate start from the initiating document leaves the live proof alone
       (value) => (response = value),
     );
     assert.deepEqual(response, { success: true, alreadyStarted: true });
-    assert.equal(resolved, 0);
     assert.equal(ctx.activeSessionId, "private-one");
     assert.deepEqual(sent, []);
   } finally {
@@ -294,7 +287,6 @@ test("bound completion delivers only server-accepted proofs to the initiating do
     MESSAGE_ACTIONS,
     MESSAGE_SOURCES,
     RECLAIM_SESSION_STATUS,
-    expectManyClaims: false,
     aborted: false,
     sessionId: "private-one",
     activeSessionId: "private-one",
@@ -322,7 +314,7 @@ test("bound completion delivers only server-accepted proofs to the initiating do
     const delivery = sent.find((item) => item.message?.action === MESSAGE_ACTIONS.PROOF_SUBMITTED);
     assert.equal(delivery.tabId, 42);
     assert.deepEqual(delivery.message.data.formattedProofs, accepted);
-    assert.deepEqual(delivery.options, { frameId: 0, documentId: "hub-document" });
+    assert.deepEqual(delivery.options, { frameId: 0, documentId: "caller-document" });
     assert.equal(
       sent.some(
         (item) => item.tabId === 99 && item.message?.action === MESSAGE_ACTIONS.PROOF_SUBMITTED,
@@ -353,7 +345,6 @@ test("rejected private intake emits only a scoped failure and closes the session
     MESSAGE_ACTIONS,
     MESSAGE_SOURCES,
     RECLAIM_SESSION_STATUS,
-    expectManyClaims: false,
     aborted: false,
     sessionId: "private-one",
     activeSessionId: "private-one",
@@ -393,7 +384,7 @@ test("rejected private intake emits only a scoped failure and closes the session
           42,
           MESSAGE_ACTIONS.PROOF_SUBMISSION_FAILED,
           "VERIFICATION_FAILED",
-          { frameId: 0, documentId: "hub-document" },
+          { frameId: 0, documentId: "caller-document" },
         ],
       ],
     );
@@ -417,7 +408,6 @@ test("a backend outage or cancel during proof submission keeps its own code", as
         MESSAGE_ACTIONS,
         MESSAGE_SOURCES,
         RECLAIM_SESSION_STATUS,
-        expectManyClaims: false,
         aborted: false,
         sessionId: "private-one",
         activeSessionId: "private-one",
@@ -608,7 +598,6 @@ function overlapContext(statuses) {
     MESSAGE_ACTIONS,
     MESSAGE_SOURCES,
     RECLAIM_SESSION_STATUS,
-    expectManyClaims: false,
     aborted: false,
     sessionId: "private-one",
     activeSessionId: "private-one",
@@ -677,9 +666,10 @@ test("a failure during proof submission leaves the submission's outcome as the o
     chrome.tabs.sendMessage = originalSend;
   }
   assert.deepEqual(statuses, []);
+  // The provider tab's notice only shows the widget's success state; the page gets one terminal event.
   assert.deepEqual(
     sent.map((message) => message.action),
-    [MESSAGE_ACTIONS.PROOF_SUBMITTED],
+    [MESSAGE_ACTIONS.PROOF_SUBMITTED, MESSAGE_ACTIONS.PROVIDER_TAB_VERIFIED],
   );
   assert.equal(ctx.activeSessionId, null);
 });

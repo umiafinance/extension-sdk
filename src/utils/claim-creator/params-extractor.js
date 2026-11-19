@@ -7,7 +7,7 @@ import {
   RedactionResolveError,
 } from "./attestor-extraction.js";
 // .js extension required: Node's ESM loader does not resolve extensionless
-// relative paths, and this module is unit-tested (see CLAUDE.md).
+// relative paths, and this module is unit-tested.
 import { EVENT_TYPES } from "../logger/constants.js";
 
 /**
@@ -208,10 +208,8 @@ export const extractParamsFromResponse = (
       try {
         slices = resolveRedaction(responseText, redaction).map((entry) => entry.value);
 
-        // The success half of the chain. Until this existed, only *failures*
-        // were reported (reportExtractionFailure in the background), so a
-        // selector that resolved to the wrong region — or to an empty string —
-        // was indistinguishable from one that was never evaluated. Selector
+        // The success half of the chain, so a selector that resolved to the
+        // wrong region is distinguishable from one never evaluated. Selector
         // text is provider-authored; the resolved content is the user's, so
         // only its shape appears here and the values themselves ride the
         // payload, which is blanked at INFO and raw at FINE.
@@ -344,15 +342,8 @@ const firstTemplateMatch = ({ regex, named }, haystacks, paramNames) => {
 };
 
 /**
- * Names of params whose responseRedaction has a hash set (oprf, etc.) — these
- * must be routed to secretParams regardless of naming, since a hashed
- * redaction signals the provider wants this value kept out of the public
- * claim, and extractParamsFromResponse extracts it independently of hash.
- * @param {Array} responseMatches
- * @param {Array} responseRedactions
- * @returns {Set<string>}
- */
-/**
+ * Names of params whose responseRedaction has a hash set (oprf, etc.).
+ *
  * NOTE: do NOT use this to force params into `secretParams`. Doing so breaks
  * OPRF — see the long comment at the separateParams call site in
  * claim-creator.js. Kept because knowing which params are hashed is useful for

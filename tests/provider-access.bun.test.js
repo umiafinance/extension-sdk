@@ -54,13 +54,13 @@ test("granted provider sites get the SDK content script in every frame at docume
     providerContentScript({
       id: "provider-sites",
       matches: ["https://*.example.com/*"],
-      css: ["popup-patches.css"],
+      css: ["consumer.css"],
     }),
     {
       id: "provider-sites",
       matches: ["https://*.example.com/*"],
       js: [PROVIDER_CONTENT_SCRIPT_PATH],
-      css: ["popup-patches.css"],
+      css: ["consumer.css"],
       runAt: "document_start",
       persistAcrossSessions: true,
       allFrames: true,

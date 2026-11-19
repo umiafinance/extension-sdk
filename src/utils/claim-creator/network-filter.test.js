@@ -4,9 +4,7 @@
  * This gate decides whether a request is ever forwarded to the background, so a
  * miss here is not a degraded claim — it is no claim at all. Nothing downstream
  * logs, because nothing downstream runs: the session simply dies on the timer
- * with "request intercepted" as its last word. That happened for real with a
- * provider whose `urlType` was the upstream default, `CONSTANT`, which this gate
- * did not recognise and therefore never matched.
+ * with "request intercepted" as its last word.
  */
 
 import { describe, it } from "node:test";
@@ -18,7 +16,7 @@ import {
   MATCH_STAGES,
 } from "./network-filter.js";
 
-const RESPONSE = '{"user":{"name":"sajjad"}}';
+const RESPONSE = '{"user":{"name":"alice"}}';
 
 /** Minimal shape filterRequest expects for a GET whose response we don't gate on. */
 function request(url, overrides = {}) {
@@ -38,8 +36,8 @@ function criteria(overrides = {}) {
 describe("url matching by urlType", () => {
   it("matches the upstream default, CONSTANT", () => {
     // Regression guard. The upstream enum is REGEX | CONSTANT | TEMPLATE, and
-    // InApp infers CONSTANT for any url without "{{" — so this is the value most
-    // providers carry. The gate used to fall through to `return false`.
+    // InApp infers CONSTANT for any url without "{{", so this is the value most
+    // providers carry.
     assert.equal(
       filterRequest(request("https://etherscan.io/myaccount"), criteria({ urlType: "CONSTANT" })),
       true,
@@ -139,7 +137,7 @@ describe("why a request was rejected", () => {
       [
         "responseMissing",
         request("https://etherscan.io/myaccount", { responseText: "" }),
-        criteria({ urlType: "CONSTANT", responseMatches: [{ value: "sajjad", type: "contains" }] }),
+        criteria({ urlType: "CONSTANT", responseMatches: [{ value: "alice", type: "contains" }] }),
         MATCH_STAGES.RESPONSE_MISSING,
       ],
       [
@@ -167,17 +165,16 @@ describe("why a request was rejected", () => {
   it("reports MATCHED when everything passes", () => {
     const verdict = describeRequestMatch(
       request("https://etherscan.io/myaccount"),
-      criteria({ urlType: "CONSTANT", responseMatches: [{ value: "sajjad", type: "contains" }] }),
+      criteria({ urlType: "CONSTANT", responseMatches: [{ value: "alice", type: "contains" }] }),
       {},
     );
     assert.deepEqual(verdict, { matched: true, stage: MATCH_STAGES.MATCHED });
   });
 
   it("keeps request and response bodies out of the reason", () => {
-    // `detail` becomes a log line, and log lines are never redacted — only the
-    // structured payload is. A body echoed here would reach Loki verbatim on
-    // every near miss, which is exactly how RedactionResolveError once leaked
-    // the user's authenticated page.
+    // `detail` becomes a log line, and log lines are never redacted: only the
+    // structured payload is. A body echoed here would be printed verbatim on
+    // every near miss.
     const secretBody = '{"accountNumber":"1234567890"}';
     const secretResponse = '{"user":{"name":"topsecretuser"}}';
 

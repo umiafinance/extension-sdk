@@ -2,9 +2,6 @@
 import { Buffer } from "buffer";
 import process from "process";
 
-// Skip WebSocket import for content script
-// import { WebSocket } from './websocket-polyfill';
-
 // Define a safe global object that works across environments
 const getGlobalObject = () => {
   if (typeof window !== "undefined") return window;
@@ -108,13 +105,6 @@ if (typeof process !== "undefined") {
   if (!process.version) process.version = "v16.0.0"; // Mock Node.js version
   if (!process.cwd) process.cwd = () => "/"; // Mock current working directory
 }
-
-// TextEncoder and TextDecoder are available in both browser and service worker
-// if (typeof global.TextEncoder === "undefined" && !isServiceWorker) {
-//   const encoding = require("text-encoding");
-//   global.TextEncoder = encoding.TextEncoder;
-//   global.TextDecoder = encoding.TextDecoder;
-// }
 
 // Handle other Node.js-specific functionality
 if (typeof global.global === "undefined") {

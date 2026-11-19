@@ -38,20 +38,18 @@ export async function processNextQueueItem(ctx) {
 
         if (completedTemplate === templateCount) {
           ctx.sessionTimerManager.clearAllTimers();
-          if (!ctx.expectManyClaims)
-            setTimeout(() => {
-              if (ctx.activeSessionId === processingSessionId) ctx.submitProofs();
-            }, 0);
+          setTimeout(() => {
+            if (ctx.activeSessionId === processingSessionId) ctx.submitProofs();
+          }, 0);
         } else {
           ctx.sessionTimerManager.resumeSessionTimer();
         }
       } else {
         // Manual mode: queue is empty → submit whatever we have
         ctx.sessionTimerManager.clearAllTimers();
-        if (!ctx.expectManyClaims)
-          setTimeout(() => {
-            if (ctx.activeSessionId === processingSessionId) ctx.submitProofs();
-          }, 0);
+        setTimeout(() => {
+          if (ctx.activeSessionId === processingSessionId) ctx.submitProofs();
+        }, 0);
       }
       return;
     }
@@ -146,11 +144,8 @@ export async function processNextQueueItem(ctx) {
     }
   } catch (error) {
     if (ctx.activeSessionId !== processingSessionId || ctx.aborted) return;
-    // Not every rejection down this path is an Error: the offscreen bridge used
-    // to reject a bare `{success, error}` literal, which made this line — the
-    // session's only explanation of a proof failure — read "…: undefined", and
-    // put that same string on the consumer's Promise. Fixed at the source, but
-    // read both shapes so the next plain-object rejection is still legible.
+    // Not every rejection down this path is an Error, so read both shapes to keep a
+    // plain `{success, error}` rejection legible.
     const reason = error?.message || error?.error || String(error);
 
     loggingHub.error(
@@ -169,6 +164,8 @@ export async function processNextQueueItem(ctx) {
     if (ctx.aborted || ctx.activeSessionId !== processingSessionId) return;
 
     if (ctx.proofGenerationQueue.length > 0) {
+      // The timer this proof restarted must not run while an already-captured claim generates.
+      ctx.sessionTimerManager.clearSessionTimer();
       processNextQueueItem(ctx);
     } else {
       const templateCount = Array.isArray(ctx.providerData?.requestData)
@@ -182,20 +179,18 @@ export async function processNextQueueItem(ctx) {
 
         ctx.sessionTimerManager.clearAllTimers();
         if (completedTemplate === templateCount) {
-          if (!ctx.expectManyClaims)
-            setTimeout(() => {
-              if (ctx.activeSessionId === processingSessionId) ctx.submitProofs();
-            }, 0);
+          setTimeout(() => {
+            if (ctx.activeSessionId === processingSessionId) ctx.submitProofs();
+          }, 0);
         } else {
           ctx.sessionTimerManager.resumeSessionTimer();
         }
       } else {
         // Manual mode: queue is empty → submit whatever we have
         ctx.sessionTimerManager.clearAllTimers();
-        if (!ctx.expectManyClaims)
-          setTimeout(() => {
-            if (ctx.activeSessionId === processingSessionId) ctx.submitProofs();
-          }, 0);
+        setTimeout(() => {
+          if (ctx.activeSessionId === processingSessionId) ctx.submitProofs();
+        }, 0);
       }
     }
   }

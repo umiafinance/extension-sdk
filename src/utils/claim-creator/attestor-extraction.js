@@ -133,9 +133,8 @@ export function resolveRedaction(body, rs) {
     const match = regexp.exec(elem);
 
     if (!match?.[0]) {
-      // The element text used to be interpolated into this message, which put up
-      // to 200 characters of the user's authenticated page into every log line.
-      // It travels as `element` now, so the log layer can redact it.
+      // The element text travels as `element`, not in the message, so the log
+      // layer can redact it.
       throw new RedactionResolveError(
         `regexp ${rs.regex} does not match the selected element (element length: ${elem.length})`,
         { stage: "regex", element: elem },
@@ -192,8 +191,3 @@ export function describeRedaction(rs) {
   if (rs.regex) parts.push(`regex: ${rs.regex}`);
   return parts.join(", ") || "empty redaction";
 }
-
-// `truncate()` lived here to cap response content spliced into an error
-// message. Nothing embeds response content in a message any more — it travels as
-// RedactionResolveError.element and is redacted by the log layer — so the
-// helper is gone rather than left as an invitation.

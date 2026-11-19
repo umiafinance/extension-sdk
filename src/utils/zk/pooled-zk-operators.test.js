@@ -202,3 +202,24 @@ test("worker construction failure uses the stock prover", async () => {
   assert.equal((await operators.chacha20.groth16Prove(new Uint8Array([1]))).proof, "inline");
   operators.close();
 });
+
+test("Stwo metrics count original and encoded proof bytes without exposing proof data", async () => {
+  const events = [];
+  const raw = new Uint8Array(200_000).fill(65);
+  const operators = makePooledStwoOperators(0, {
+    makeOperator: () => ({ groth16Prove: async () => ({ proof: raw }) }),
+    onProve: (event) => events.push(event),
+  });
+  try {
+    const encoded = await operators.chacha20.groth16Prove(new Uint8Array([1]));
+    assert.equal(events.length, 1);
+    assert.equal(events[0].proofBytes, raw.byteLength);
+    assert.equal(events[0].encodedProofBytes, encoded.proof.byteLength);
+    assert.ok(events[0].encodedProofBytes < events[0].proofBytes);
+    assert.equal(Object.values(events[0]).some((value) => value instanceof Uint8Array), false);
+    assert.equal("proof" in events[0], false);
+    assert.equal("witness" in events[0], false);
+  } finally {
+    operators.close();
+  }
+});

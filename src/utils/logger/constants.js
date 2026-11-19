@@ -11,7 +11,7 @@ export const LOG_SOURCES = {
  * (reclaim-inapp-sdk/lib/src/logging/event_type.dart).
  *
  * A name that exists upstream MUST be spelled the same way here — the whole
- * point is that one Grafana query works across SDKs. Names that used to differ
+ * point is that one log query works across SDKs. Names that used to differ
  * were renamed to InApp's spelling:
  *
  *   RESPONSE_MATCH_FAILED        → NO_RESPONSE_MATCH_WARNING
@@ -103,9 +103,7 @@ export const EVENT_TYPES = {
  *
  * The names are NOT arbitrary. The InApp SDK, the Portal and the log viewer all
  * speak Java-style levels, and the logs API only accepts
- * `fine | config | info | warning | severe` when filtering by severity. The
- * extension used to emit ERROR/WARN/DEBUG, which meant its lines could not be
- * filtered by severity alongside the other SDKs' at all.
+ * `fine | config | info | warning | severe` when filtering by severity.
  *
  * There are only two levels a caller has to think about:
  *

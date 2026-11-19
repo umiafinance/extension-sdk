@@ -4,7 +4,7 @@ import initBackground from "./background/background";
 import { API_ENDPOINTS, RECLAIM_SDK_ACTIONS } from "./utils/constants";
 import { LOG_CONFIG_STORAGE_KEY, DEFAULT_LOG_CONFIG } from "./utils/logger/constants";
 import { withClientSource, getClientSource } from "./utils/logger/client-source";
-import { approvedBackendUrl, validateCaller } from "./utils/session-config";
+import { approveProfiles, approvedBackendUrl, validateCaller } from "./utils/session-config";
 import { freezeUmia, verificationTemplate } from "./utils/session-transport";
 
 // Global verification queue to serialize extension sessions (background is single-session)
@@ -12,8 +12,6 @@ const _verificationQueue = [];
 let _queueRunning = false;
 // eslint-disable-next-line no-undef
 const SDK_VERSION = __SDK_VERSION__;
-
-export const ZKTLS_BOUND_SESSION_ROUTE_VERSION = 1;
 
 function _enqueueVerification(task) {
   return new Promise((resolve, reject) => {
@@ -49,10 +47,8 @@ class ReclaimExtensionProofRequest {
     this.context = { contextAddress: "0x0", contextMessage: "sample context" };
     this.redirectUrl = "";
     this.sdkVersion = `ext-${SDK_VERSION}`;
-    this.resolvedProviderVersion = "";
     this.jsonProofResponse = false;
     this.extensionID = options.extensionID || "";
-    this.providerVersion = options.providerVersion || "";
     this.acceptAiProviders = !!options.acceptAiProviders;
     this.callbackUrl = options.callbackUrl || "";
     this.umia = null;
@@ -118,10 +114,8 @@ class ReclaimExtensionProofRequest {
       appId: applicationId,
       timestamp: instance.timestamp,
       signature,
-      versionNumber: instance.providerVersion || "",
     });
     instance.sessionId = initRes.sessionId || "";
-    instance.resolvedProviderVersion = initRes.resolvedProviderVersion || "";
     return instance;
   }
 
@@ -145,8 +139,6 @@ class ReclaimExtensionProofRequest {
     instance.context = config.context || instance.context;
     instance.callbackUrl = String(config.appCallbackUrl || config.callbackUrl || "");
     instance.jsonProofResponse = !!(config.jsonProofResponse ?? instance.jsonProofResponse);
-    instance.resolvedProviderVersion = String(config.resolvedProviderVersion || "");
-    instance.providerVersion = String(config.providerVersion || "");
     instance.umia = freezeUmia(config.umia);
     instance.redirectUrl = String(config.redirectUrl || "");
     instance.acceptAiProviders = !!(
@@ -380,10 +372,12 @@ class ReclaimExtensionSDK {
   }
 
   // Must be called from the consumer's own background service worker.
-  initializeBackground(runtimeConfig) {
+  // `profiles` names the endpoint profiles this extension build serves; others are refused.
+  initializeBackground({ profiles } = {}) {
     if (this._backgroundInitialized) return this._ctx;
     try {
-      const ctx = initBackground(runtimeConfig);
+      if (profiles) approveProfiles(profiles);
+      const ctx = initBackground();
       this._backgroundInitialized = true;
       this._ctx = ctx;
       return ctx;
@@ -485,7 +479,7 @@ class ReclaimExtensionSDK {
       }
     } catch {}
 
-    // A web page cannot change the extension's log config; only extension pages can.
+    // Only extension pages can change the extension's log config.
     return false;
   }
 

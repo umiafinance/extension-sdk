@@ -12,8 +12,7 @@ import { EVENT_TYPES } from "../utils/logger/constants";
      *
      * Goes through the page-world bridge rather than straight to `console`, so
      * these lines reach the LoggingHub like every other context's, and respect
-     * the SDK's console config. The `log`/`info`/
-     * `error` shape is unchanged from the previous local `debug` object.
+     * the SDK's console config.
      */
     const debug = createPageLogger("interceptor", "interceptor.network");
 
@@ -170,29 +169,6 @@ import { EVENT_TYPES } from "../utils/logger/constants";
             self.processResponseMiddlewares(forAudit, requestData).catch(debug.error);
 
             return forApp;
-
-            // FIX: Don't create a prototype-chained response, use the original
-            // Just mark it non-destructively
-            // if (!response._rc) {
-            //   // Only mark it if not already marked
-            //   try {
-            //     Object.defineProperty(response, "_rc", {
-            //       value: true,
-            //       enumerable: false,
-            //       configurable: false,
-            //       writable: false,
-            //     });
-            //   } catch (e) {
-            //     // In case the response is immutable, don't break the app
-            //     debug.error("Could not mark response:", e);
-            //   }
-            // }
-
-            // // Process response middlewares without blocking
-            // self.processResponseMiddlewares(response.clone(), requestData).catch((error) => {
-            //   debug.error("Error in response middleware:", error);
-            // });
-            // return response; // Return the original response object
           },
         });
 
@@ -480,14 +456,6 @@ import { EVENT_TYPES } from "../utils/logger/constants";
                 : "GET",
             headers: extractHeaders(request.options.headers),
             body: extractBody(request.options.body),
-            // Populated by a custom-injection request middleware (e.g. via
-            // window.reclaimInterceptor.addRequestMiddleware) when it derives
-            // param values a declared URL/body template can't express, such
-            // as a fixed-length split of a path segment.
-            extractedParams:
-              request.extractedParams && typeof request.extractedParams === "object"
-                ? request.extractedParams
-                : {},
           },
           response: {
             url: url,

@@ -1,4 +1,3 @@
-// src/utils/offscreen-manager.js
 import { MESSAGE_ACTIONS, MESSAGE_SOURCES } from "./constants";
 import {
   OFFSCREEN_READY_TIMEOUT_MS,

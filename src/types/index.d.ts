@@ -1,12 +1,8 @@
-import type {
-  ZktlsEndpointActivationRecord,
-  ZktlsSessionConfig,
-} from "@umia/types/zktls-self-host";
+import type { ZktlsSessionConfig } from "@umia/zktls-config/self-host";
 
 export interface InitOptions {
   extensionID?: string;
   endpointProfile?: string;
-  providerVersion?: string;
   callbackUrl?: string;
 }
 
@@ -50,13 +46,7 @@ export class ReclaimExtensionProofRequest {
 }
 
 export class ReclaimExtensionSDK {
-  initializeBackground(runtimeConfig?: {
-    resolveSessionRoute: (request: {
-      sender: chrome.runtime.MessageSender;
-      sessionId: string;
-      candidate: Pick<ZktlsSessionConfig, "backendUrl" | "attestorUrl" | "witness" | "network">;
-    }) => Promise<ZktlsEndpointActivationRecord | null>;
-  }): unknown;
+  initializeBackground(options?: { profiles?: readonly string[] }): unknown;
   isExtensionInstalled(opts?: { extensionID?: string; timeout?: number }): Promise<boolean>;
   getVersion(): string;
   init(
@@ -74,5 +64,4 @@ export class ReclaimExtensionSDK {
 }
 
 export const reclaimExtensionSDK: ReclaimExtensionSDK;
-export const ZKTLS_BOUND_SESSION_ROUTE_VERSION: 1;
 export default ReclaimExtensionSDK;

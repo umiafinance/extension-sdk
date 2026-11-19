@@ -1,41 +1,44 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "bun:test";
-import { publicProviderData, runBoundInjection } from "../src/background/injectionManager.js";
+import {
+  publicProviderData,
+  REQUEST_CHAIN_OP,
+  runBoundRequestChain,
+} from "../src/background/injectionManager.js";
 
-const code = "window.Reclaim.updatePublicData({ok: true})";
-const digest = `sha256:${createHash("sha256").update(code, "utf8").digest("hex")}`;
-const origin = "https://provider.example";
+const origin = "https://fomo.family";
 const documentId = "provider-document";
+const recipe = JSON.parse(
+  readFileSync(new URL("../../providers/recipes/fomo-clans/no-clan.json", import.meta.url), "utf8"),
+);
 
 function fixture() {
   const now = Math.floor(Date.now() / 1000);
   const session = {
     sessionId: "bound-one",
     umia: {
-      providerVersion: "v7",
       sessionToken: "private-bearer",
       expiresAt: new Date((now + 600) * 1000).toISOString(),
-      attestorAuth: { data: { id: "bound-one", expiresAt: now + 300 } },
+      attestorAuth: {
+        data: { id: "bound-one", expiresAt: now + 300, hostWhitelist: ["prod-api.fomo.family"] },
+      },
     },
     route: {
-      authority: { validUntil: new Date((now + 600) * 1000).toISOString() },
+      network: { environment: "devnet", chainId: 10143 },
     },
   };
   const providerData = {
     id: "approved-provider",
-    version: "v7",
-    versionNumber: "v7",
-    providerConfigs: [{ loginUrl: `${origin}/login` }],
-    customInjection: code,
-    customInjectionSha256: digest,
+    providerConfigs: [{ loginUrl: `${origin}/` }],
+    requestChain: structuredClone(recipe.providerRuntime.requestChain),
+    requestData: structuredClone(recipe.providerConfigs[0].requestData),
     recipeDigest: `sha256:${"a".repeat(64)}`,
   };
   const ctx = {
     session,
     providerData,
-    providerLoginUrl: `${origin}/login`,
+    providerLoginUrl: `${origin}/`,
     providerId: "approved-provider",
     sessionId: "bound-one",
     activeSessionId: "bound-one",
@@ -51,12 +54,12 @@ function fixture() {
     documentId,
     documentLifecycle: "active",
     origin,
-    url: `${origin}/login`,
+    url: `${origin}/`,
   };
   const calls = [];
   globalThis.chrome = {
     runtime: { id: "installed-extension" },
-    tabs: { get: async () => ({ url: `${origin}/login` }) },
+    tabs: { get: async () => ({ url: `${origin}/` }) },
     scripting: {
       executeScript: async (injection) => {
         calls.push(injection);
@@ -67,31 +70,51 @@ function fixture() {
   return { ctx, sender, calls };
 }
 
-const operation = { op: "RUN_CUSTOM_INJECTION" };
+const operation = { op: REQUEST_CHAIN_OP };
 
-test("only approved code reaches one bound MAIN document", async () => {
+test("only the bound recipe's declarative requests reach the page, once per document", async () => {
   const { ctx, sender, calls } = fixture();
-  assert.deepEqual(await runBoundInjection(ctx, sender, operation), {
-    success: true,
-    status: "executed",
-  });
+  assert.equal((await runBoundRequestChain(ctx, sender, operation)).status, "executed");
   assert.deepEqual(calls[0].target, { tabId: 91, documentIds: [documentId] });
   assert.equal(calls[0].world, "MAIN");
-  assert.deepEqual(calls[0].args, [code]);
+  assert.deepEqual(calls[0].args.slice(0, 2), [
+    ctx.providerData.requestChain,
+    ctx.providerData.requestData.map((request) => request.url),
+  ]);
+  assert.ok(calls[0].args[2] <= Date.parse(ctx.session.umia.expiresAt));
   assert.equal(JSON.stringify(calls[0]).includes(ctx.session.umia.sessionToken), false);
-  assert.deepEqual(await runBoundInjection(ctx, sender, operation), {
-    success: true,
-    status: "duplicate",
-  });
+  assert.equal((await runBoundRequestChain(ctx, sender, operation)).status, "duplicate");
   assert.equal(calls.length, 1);
-  assert.deepEqual(publicProviderData(ctx), {
-    id: "approved-provider",
-    version: "v7",
-    versionNumber: "v7",
-    providerConfigs: [{ loginUrl: `${origin}/login` }],
-    recipeDigest: ctx.providerData.recipeDigest,
-    loginUrl: `${origin}/login`,
+  assert.equal(publicProviderData(ctx).loginUrl, `${origin}/`);
+});
+
+test("request chains reject unsigned hosts and unresolved parameters", async () => {
+  for (const change of [
+    (ctx) => {
+      ctx.session.umia.attestorAuth.data.hostWhitelist = [];
+    },
+    (ctx) => {
+      ctx.providerData.requestChain.readyUrl = "https://outside.example/pin";
+    },
+    (ctx) => {
+      ctx.providerData.requestChain.responseParameters[0].requestIndex = 1;
+    },
+  ]) {
+    const { ctx, sender, calls } = fixture();
+    change(ctx);
+    assert.equal((await runBoundRequestChain(ctx, sender, operation)).success, false);
+    assert.equal(calls.length, 0);
+  }
+});
+
+test("a provider with no request chain runs nothing", async () => {
+  const { ctx, sender, calls } = fixture();
+  delete ctx.providerData.requestChain;
+  assert.deepEqual(await runBoundRequestChain(ctx, sender, operation), {
+    success: true,
+    status: "skipped",
   });
+  assert.equal(calls.length, 0);
 });
 
 test("a rejected provider pin fails before a provider tab is opened", async () => {
@@ -113,7 +136,6 @@ test("a rejected provider pin fails before a provider tab is opened", async () =
         ...ctx.session,
         route: {
           ...ctx.session.route,
-          authority: { ...ctx.session.route.authority, witnesses: [] },
           network: {},
         },
       },
@@ -125,26 +147,24 @@ test("a rejected provider pin fails before a provider tab is opened", async () =
   assert.equal(ctx.providerLoginUrl, null);
 });
 
-test("rejects page-supplied code, provider overrides, and wrong bound metadata", async () => {
+test("rejects page-supplied payloads, legacy ops, and wrong bound metadata", async () => {
   for (const supplied of [
-    { op: "RUN_CUSTOM_INJECTION", code: "evil" },
-    { op: "RUN_CUSTOM_INJECTION", providerId: "other" },
+    { op: REQUEST_CHAIN_OP, code: "evil" },
+    { op: REQUEST_CHAIN_OP, providerId: "other" },
+    { op: "RUN_CUSTOM_INJECTION" },
     { op: "REPLAY_PAGE_FETCH" },
   ]) {
     const { ctx, sender, calls } = fixture();
-    assert.equal((await runBoundInjection(ctx, sender, supplied)).success, false);
+    assert.equal((await runBoundRequestChain(ctx, sender, supplied)).success, false);
     assert.equal(calls.length, 0);
   }
   for (const change of [
     (ctx) => (ctx.providerLoginUrl = "https://other.example/login"),
     (ctx) => (ctx.providerLoginUrl = null),
-    (ctx) => (ctx.providerData.customInjectionSha256 = ctx.providerData.recipeDigest),
-    (ctx) => (ctx.providerData.customInjectionSha256 = undefined),
-    (ctx) => (ctx.providerData.customInjection += "\n"),
   ]) {
     const { ctx, sender, calls } = fixture();
     change(ctx);
-    assert.equal((await runBoundInjection(ctx, sender, operation)).success, false);
+    assert.equal((await runBoundRequestChain(ctx, sender, operation)).success, false);
     assert.equal(calls.length, 0);
   }
 });
@@ -165,12 +185,12 @@ test("rejects unowned frames, documents, origins, expired and cancelled sessions
   ]) {
     const { ctx, sender, calls } = fixture();
     change(ctx, sender);
-    assert.equal((await runBoundInjection(ctx, sender, operation)).success, false);
+    assert.equal((await runBoundRequestChain(ctx, sender, operation)).success, false);
     assert.equal(calls.length, 0);
   }
   const { ctx, sender, calls } = fixture();
   chrome.tabs.get = async () => ({ url: "https://other.example" });
-  assert.equal((await runBoundInjection(ctx, sender, operation)).success, false);
+  assert.equal((await runBoundRequestChain(ctx, sender, operation)).success, false);
   assert.equal(calls.length, 0);
 });
 
@@ -184,7 +204,7 @@ test("suppresses stale results after replacement and never reruns the old docume
     entered();
     return await new Promise((resolve) => (settle = resolve));
   };
-  const pending = runBoundInjection(ctx, sender, operation);
+  const pending = runBoundRequestChain(ctx, sender, operation);
   await executing;
   ctx.activeSessionId = "bound-two";
   ctx.injectionOperations = new Map();
@@ -193,25 +213,16 @@ test("suppresses stale results after replacement and never reruns the old docume
   assert.equal(calls.length, 1);
 });
 
-test("runs once per navigated document and skips providers without code", async () => {
+test("runs once per navigated document", async () => {
   const { ctx, sender, calls } = fixture();
-  assert.equal((await runBoundInjection(ctx, sender, operation)).status, "executed");
+  assert.equal((await runBoundRequestChain(ctx, sender, operation)).status, "executed");
   const navigated = { ...sender, documentId: "next-document" };
   chrome.scripting.executeScript = async (injection) => {
     calls.push(injection);
     return [{ documentId: "next-document", frameId: 0, result: { status: "executed" } }];
   };
-  assert.equal((await runBoundInjection(ctx, navigated, operation)).status, "executed");
+  assert.equal((await runBoundRequestChain(ctx, navigated, operation)).status, "executed");
   assert.deepEqual(calls[1].target, { tabId: 91, documentIds: ["next-document"] });
-
-  const bare = fixture();
-  delete bare.ctx.providerData.customInjection;
-  delete bare.ctx.providerData.customInjectionSha256;
-  assert.deepEqual(await runBoundInjection(bare.ctx, bare.sender, operation), {
-    success: true,
-    status: "skipped",
-  });
-  assert.equal(bare.calls.length, 0);
 });
 
 test("a failed or uncertain execution never reruns in the same document", async () => {
@@ -228,11 +239,11 @@ test("a failed or uncertain execution never reruns in the same document", async 
       calls.push(injection);
       return outcome();
     };
-    assert.deepEqual(await runBoundInjection(ctx, sender, operation), {
+    assert.deepEqual(await runBoundRequestChain(ctx, sender, operation), {
       success: false,
       error: "INJECTION_REJECTED",
     });
-    assert.deepEqual(await runBoundInjection(ctx, sender, operation), {
+    assert.deepEqual(await runBoundRequestChain(ctx, sender, operation), {
       success: false,
       error: "INJECTION_REJECTED",
     });
@@ -247,8 +258,8 @@ test("a concurrent request for a pending document is rejected without a second r
     calls.push(injection);
     return await new Promise((resolve) => (settle = resolve));
   };
-  const first = runBoundInjection(ctx, sender, operation);
-  assert.deepEqual(await runBoundInjection(ctx, sender, operation), {
+  const first = runBoundRequestChain(ctx, sender, operation);
+  assert.deepEqual(await runBoundRequestChain(ctx, sender, operation), {
     success: false,
     error: "INJECTION_REJECTED",
   });
@@ -258,14 +269,20 @@ test("a concurrent request for a pending document is rejected without a second r
   assert.equal(calls.length, 1);
 });
 
-test("page-world and content sources carry no code, provider ID, or hosted loader", () => {
+test("no source runs provider-authored code or exposes a page API", () => {
   const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
-  const page = read("../src/interceptor/injection-scripts.js");
-  for (const banned of ["fetch(", "eval", "reclaimprotocol", "InjectionScript", "ProviderId"]) {
-    assert.equal(page.includes(banned), false, banned);
+  const background = read("../src/background/injectionManager.js");
+  for (const banned of [/\beval\(/, /customInjection/, /new Function/]) {
+    assert.equal(banned.test(background), false, String(banned));
   }
   const content = read("../src/content/content.js");
-  for (const banned of ["customInjection", "REPLAY_PAGE_FETCH", "RECLAIM_GET_PROVIDER_ID"]) {
+  assert.equal(content.match(/localStorage\.\w+/g)?.join(), "localStorage.removeItem");
+  for (const banned of [
+    "customInjection",
+    "injection-scripts",
+    "REPLAY_PAGE_FETCH",
+    "RECLAIM_GET_PROVIDER_ID",
+  ]) {
     assert.equal(content.includes(banned), false, banned);
   }
 });

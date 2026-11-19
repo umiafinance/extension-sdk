@@ -5,8 +5,12 @@ import { failureCode } from "../utils/constants/interfaces";
 import {
   ZKTLS_ATTESTOR_REJECTION_CODES,
   zktlsAttestorRejectionReason,
-} from "@umia/types/zktls-self-host";
-import { createClaimOnAttestor, makeDefaultZkOperator } from "@reclaimprotocol/attestor-core/browser";
+} from "@umia/zktls-config/self-host";
+import {
+  createClaimOnAttestor,
+  makeDefaultZkOperator,
+  proto,
+} from "@reclaimprotocol/attestor-core/browser";
 import { WebSocket } from "../utils/offscreen-websocket";
 import { updateSessionStatus } from "../utils/fetch-calls";
 import { createRemoteLogger } from "../utils/logger/RemoteLogger";
@@ -16,17 +20,26 @@ import {
   makePooledSnarkjsOperators,
   makePooledStwoOperators,
 } from "../utils/zk/pooled-zk-operators";
+import { approveProfiles } from "../utils/session-config";
 import { takeOffscreenSession } from "../utils/session-transport";
 import { BoundAttestorSessions } from "./session-attestor";
 
 const logger = createRemoteLogger("offscreen");
 
-// The attestor names a rejection by `data.reason`, or by code alone before #2833; its
+// Thrown errors use symbolic codes; embedded claim errors keep the numeric wire
+// enum. Only known enum names may enter logs, never arbitrary error text.
+function attestorErrorCode(error) {
+  return Object.entries(proto.ErrorCode).find(
+    ([name, value]) => name.startsWith("ERROR_") && (error?.code === name || error?.code === value),
+  )?.[0];
+}
+
+// The attestor names a rejection by `data.reason`, or by code alone in older versions; its
 // message text is not part of the contract.
 function attestorFailureCode(error) {
   const reason = zktlsAttestorRejectionReason(error);
   if (reason) return ZKTLS_ATTESTOR_REJECTION_CODES[reason];
-  if (error?.code === "ERROR_AUTHENTICATION_FAILED") return "ATTESTOR_AUTH_FAILED";
+  if (attestorErrorCode(error) === "ERROR_AUTHENTICATION_FAILED") return "ATTESTOR_AUTH_FAILED";
   return undefined;
 }
 
@@ -78,16 +91,23 @@ class OffscreenProofGenerator {
     const makePooled = engine === "stwo" ? makePooledStwoOperators : makePooledSnarkjsOperators;
     const operators = makePooled(ZK_WORKER_POOL_SIZE, {
       makeOperator: (algorithm) => makeDefaultZkOperator(algorithm, engine),
-      onProve: ({ algorithm, poolSize, proveMs, workerProveMs, startedAt, endedAt, fallback }) => {
+      onProve: ({
+        algorithm, poolSize, proveMs, workerProveMs, startedAt, endedAt, fallback,
+        proofBytes, encodedProofBytes,
+      }) => {
         if (metrics.active) {
           metrics.chunks++;
           metrics.totalProveMs += proveMs;
           metrics.totalWorkerMs += workerProveMs || 0;
           metrics.proveStart = Math.min(metrics.proveStart, startedAt);
           metrics.proveEnd = Math.max(metrics.proveEnd, endedAt);
+          metrics.proofBytes += proofBytes ?? 0;
+          metrics.encodedProofBytes += encodedProofBytes ?? 0;
+          metrics.maxProofBytes = Math.max(metrics.maxProofBytes, proofBytes ?? 0);
+          if (encodedProofBytes < proofBytes) metrics.compressedChunks++;
         }
         logger.info(
-          `[${engine.toUpperCase()}] chunk algorithm=${algorithm} pool=${poolSize} elapsedMs=${proveMs.toFixed(1)} workerMs=${workerProveMs?.toFixed(1) ?? "inline"} fallback=${fallback}`,
+          `[${engine.toUpperCase()}] chunk algorithm=${algorithm} pool=${poolSize} elapsedMs=${proveMs.toFixed(1)} workerMs=${workerProveMs?.toFixed(1) ?? "inline"} fallback=${fallback} proofBytes=${proofBytes ?? 0} encodedProofBytes=${encodedProofBytes ?? 0}`,
           "offscreen.proof",
         );
       },
@@ -145,7 +165,8 @@ class OffscreenProofGenerator {
               eventType: EVENT_TYPES.PROOF_GENERATION_STARTED,
             });
 
-            const { session, claim } = takeOffscreenSession(data);
+            const { session, claim, profiles } = takeOffscreenSession(data);
+            if (profiles !== undefined) approveProfiles(profiles);
             // The background queue is serial. A repeated ID replaces its old
             // request, so a late resolution cannot complete the new session.
             this.closeSession(session.sessionId);
@@ -155,13 +176,12 @@ class OffscreenProofGenerator {
             if (request.cancelled) throw new Error("CANCELLED");
 
             // Edge case: proof object contains an error
-            const embeddedErr =
-              proof?.error?.message || (typeof proof?.error === "string" ? proof.error : null);
-
-            if (embeddedErr) {
-              logger.error("[OFFSCREEN] Proof contains embedded error", "offscreen.proof", {
-                eventType: EVENT_TYPES.PROOF_GENERATION_FAILED_EXCEPTION,
-              });
+            if (proof?.error) {
+              logger.error(
+                `[OFFSCREEN] Proof contains embedded error code=${attestorErrorCode(proof.error) ?? "unknown"} rejectionReason=${zktlsAttestorRejectionReason(proof.error) ?? "unknown"}`,
+                "offscreen.proof",
+                { eventType: EVENT_TYPES.PROOF_GENERATION_FAILED_EXCEPTION },
+              );
               chrome.runtime.sendMessage({
                 action: MESSAGE_ACTIONS.GENERATE_PROOF_RESPONSE,
                 source: MESSAGE_SOURCES.OFFSCREEN,
@@ -278,8 +298,6 @@ class OffscreenProofGenerator {
   async generateProof(session, claim, request) {
     const handle = this.boundSessions.open(session);
 
-    // Declared outside the try so the catch can read it — it was set here and
-    // never read anywhere, which is why nothing caught the scoping.
     let timeoutOccurred = false;
     let timeoutId;
     let claimMetrics;
@@ -312,12 +330,6 @@ class OffscreenProofGenerator {
       // Claims can include secrets; never log the offscreen transport payload.
       logger.debug("[OFFSCREEN] Claim ready for attestor", "offscreen.proof");
 
-      // NOT awaited here on purpose. Awaiting first and only then racing the
-      // timeout meant the race ran against an already-settled value, so
-      // PROOF_GENERATION_TIMEOUT_MS could never interrupt a hung attestor call
-      // — and the "promise created" line was logged after the call had already
-      // finished, landing in the same millisecond as the result and making the
-      // logs claim the call started 16s later than it did.
       claimMetrics = {
         active: true,
         engine: claim.zkEngine,
@@ -327,9 +339,15 @@ class OffscreenProofGenerator {
         totalWorkerMs: 0,
         proveStart: Infinity,
         proveEnd: 0,
+        proofBytes: 0,
+        encodedProofBytes: 0,
+        maxProofBytes: 0,
+        compressedChunks: 0,
       };
       zkOperators = this.getOperators(claim.zkEngine, claimMetrics);
       const logPrefix = `[${(claim.zkEngine || "ZK").toUpperCase()}]`;
+      // Not awaited here: the call must race the timeout so PROOF_GENERATION_TIMEOUT_MS
+      // can interrupt a hung attestor.
       const attestorPromise = createClaimOnAttestor({
         ...claim,
         client: handle.client,
@@ -360,10 +378,8 @@ class OffscreenProofGenerator {
 
       // PROOF_GENERATION_SUCCESS is deliberately NOT reported here. The attestor
       // can resolve with an error carried inside the result object, which only
-      // the caller checks. Reporting success on resolution meant a failed
-      // session recorded PROOF_GENERATION_SUCCESS and then
-      // PROOF_GENERATION_FAILED, so analytics claimed both outcomes for the same
-      // session. The caller now reports it once the proof is validated.
+      // the caller checks, so the caller reports success once the proof is
+      // validated.
       return result;
     } catch (error) {
       // Stop queued and running proofs before a failed status update can delay cleanup.
@@ -378,11 +394,15 @@ class OffscreenProofGenerator {
       // Only the attestor's fixed rejection enum is safe to include in a log
       // line; the raw error may contain claim or response bytes.
       const rejection = zktlsAttestorRejectionReason(error);
-      logger.error(`[OFFSCREEN] Error generating proof (${rejection ?? "unknown"})`, "offscreen.proof", {
-        eventType: timedOut
-          ? EVENT_TYPES.CLAIM_CREATION_TIMED_OUT_EXCEPTION
-          : EVENT_TYPES.PROOF_GENERATION_FAILED_EXCEPTION,
-      });
+      logger.error(
+        `[OFFSCREEN] Error generating proof code=${attestorErrorCode(error) ?? "unknown"} rejectionReason=${rejection ?? "unknown"}`,
+        "offscreen.proof",
+        {
+          eventType: timedOut
+            ? EVENT_TYPES.CLAIM_CREATION_TIMED_OUT_EXCEPTION
+            : EVENT_TYPES.PROOF_GENERATION_FAILED_EXCEPTION,
+        },
+      );
       const failure = attestorFailure(error, timedOut || handle.dialFailed());
       if (!TERMINAL_CODES.has(failure?.message) && !request.cancelled) {
         try {
@@ -403,6 +423,10 @@ class OffscreenProofGenerator {
         zkOperators?.close();
         logger.info(
           `[${(claimMetrics.engine || "ZK").toUpperCase()}] claim chunks=${claimMetrics.chunks} pool=${zkOperators?.poolSize ?? 0} proveWallMs=${claimMetrics.chunks ? (claimMetrics.proveEnd - claimMetrics.proveStart).toFixed(1) : 0} totalElapsedMs=${claimMetrics.totalProveMs.toFixed(1)} totalWorkerMs=${claimMetrics.totalWorkerMs.toFixed(1)} claimWallMs=${(performance.now() - claimMetrics.start).toFixed(1)}`,
+          "offscreen.proof",
+        );
+        logger.info(
+          `[${(claimMetrics.engine || "ZK").toUpperCase()}] proof-bytes total=${claimMetrics.proofBytes} max=${claimMetrics.maxProofBytes} encoded=${claimMetrics.encodedProofBytes} compressedChunks=${claimMetrics.compressedChunks} singleOver4MiB=${claimMetrics.maxProofBytes > 4 * 1024 * 1024} totalOver32MiB=${claimMetrics.proofBytes > 32 * 1024 * 1024}`,
           "offscreen.proof",
         );
       }

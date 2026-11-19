@@ -1,12 +1,6 @@
 /**
  * Tests for the URL / body / naming halves of params-extractor.
  *
- * This file used to be a no-op: it stubbed `test`/`describe`/`expect` when they
- * were undefined and only `require`d the modules under
- * `typeof jest !== 'undefined'`, so with no Jest installed it asserted nothing
- * while still reporting green. The cases below are the same scenarios it
- * described, now actually executed.
- *
  * Response extraction lives in ./attestor-extraction.test.js; parity with the
  * installed attestor lives in ./attestor-parity.test.js.
  *
@@ -124,8 +118,8 @@ describe("separateParams", () => {
   });
 
   it("still supports an explicit force-secret set", () => {
-    // The capability remains, but claim-creator no longer feeds hashed params
-    // into it — see the next test for why.
+    // The capability remains, but claim-creator does not feed hashed params
+    // into it; see the next test for why.
     const { publicParams, secretParams } = separateParams(
       { innocuousName: "sensitive", other: "fine" },
       new Set(["innocuousName"]),
@@ -150,8 +144,8 @@ describe("separateParams", () => {
     // Privacy for a hashed param comes from that substitution happening
     // client-side before the claim is sent — not from hiding the param.
     // InApp does the same: it splits on the name containing "SECRET", nothing else.
-    const { publicParams, secretParams } = separateParams({ displayName: "sajjad" });
-    assert.deepEqual(publicParams, { displayName: "sajjad" });
+    const { publicParams, secretParams } = separateParams({ displayName: "alice" });
+    assert.deepEqual(publicParams, { displayName: "alice" });
     assert.deepEqual(secretParams, {});
   });
 });

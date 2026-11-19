@@ -4,9 +4,9 @@
 export const PROVIDER_CONTENT_SCRIPT_PATH =
   "reclaim-browser-extension-sdk/content/content.bundle.js";
 
-// A provider's requests need not live on its login URL's site: Fairscale logs in on a
-// partner page and POSTs to fairscale.xyz. A grant covering only the login tab would leave
-// those requests uninterceptable, so the consumer grants their hosts too.
+// A provider's requests need not live on its login URL's site: it may log in on a partner
+// page and POST to its own domain. A grant covering only the login tab would leave those
+// requests uninterceptable, so the consumer grants their hosts too.
 export function providerRequestUrls(providerData) {
   const requests = providerData?.requestData;
   if (!Array.isArray(requests)) return [];
@@ -16,8 +16,8 @@ export function providerRequestUrls(providerData) {
 }
 
 // The dynamic registration for granted provider sites. Chrome defaults allFrames to false,
-// which silently misses a provider whose request fires inside an iframe: Fairscale's gate
-// portal refuses to load top-level, so its POST is only observable in a cross-origin frame.
+// which silently misses a provider whose request fires inside an iframe, such as a portal
+// that refuses to load top-level and is only observable in a cross-origin frame.
 export function providerContentScript({ id, matches, css = [] }) {
   return {
     id,

@@ -2,7 +2,6 @@
 // Handles tab creation and managedTabs logic
 
 export function createProviderTab(ctx, providerUrl, providerId) {
-  // Implementation will be filled in after moving logic from background.js
 }
 
 export function isManagedTab(ctx, tabId) {

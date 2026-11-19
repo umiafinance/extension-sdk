@@ -51,8 +51,7 @@ const PHONE_JSON = `{
     ]
 }`;
 
-// An HTML page with an embedded JSON island — the shape that could never work
-// before, because the old code treated xPath and jsonPath as mutually exclusive.
+// An HTML page with an embedded JSON island, which needs xPath and jsonPath chained.
 const HTML_WITH_JSON = `<html><head><title>Top Links | Hacker News</title></head><body>
   <script data-component-name="Navbar" type="application/json">{"hasBookface":true,"user":{"name":"providerreclaim","id":16935239}}</script>
 </body></html>`;
@@ -127,12 +126,13 @@ describe("vendored attestor primitives", () => {
     // use `new RegExp` (webpack aliases re2 to false), which can. This pins
     // what makeRegex does when handed a provider regex of that shape.
     //
-    // CodeQL flags it as an inefficient regular expression and Copilot Autofix
-    // has once "fixed" it to `^[a-z]+$` — a linear pattern, which makes the
-    // test assert nothing at all. Do not simplify it.
+    // CodeQL flags it as an inefficient regular expression, but a linear
+    // pattern would make the test assert nothing at all. Do not simplify it.
     // codeql[js/redos]
     const regexp = makeRegex("([a-z]+)+$");
-    regexp.test("a".repeat(31) + "\x00");
+    // Keep the input bounded: 31 letters stalls the native backtracking engine.
+    // The catastrophic pattern stays unchanged; this is not a performance test.
+    assert.equal(regexp.test("a".repeat(20) + "\x00"), false);
   });
 
   it("uses the attestor's browser flag set", () => {
@@ -246,8 +246,7 @@ describe("redaction chain", () => {
   });
 
   it("keeps response content out of the error message", () => {
-    // The message becomes a logLine and is POSTed to the diagnostic endpoint.
-    // It used to interpolate up to 200 chars of the user's authenticated page.
+    // The message is logged verbatim; only the payload is redacted.
     const secret = "SUPER_PRIVATE_ACCOUNT_VALUE";
     assert.throws(
       () => resolveRedaction(`{"account":"${secret}"}`, { regex: "nothing-like-this" }),
@@ -297,9 +296,8 @@ describe("param extraction", () => {
   });
 
   it("does not JSON.stringify an object value", () => {
-    // The old implementation returned JSON.stringify(parsedObject) here, whose
-    // spacing differs from the response bytes, so the attestor's re-assertion
-    // of the substituted template failed.
+    // JSON.stringify's spacing differs from the response bytes, so the
+    // attestor's re-assertion of the substituted template would fail.
     const params = extractParamsFromResponse(
       PHONE_JSON,
       [{ value: '"address": {{addr}}', type: "contains" }],
